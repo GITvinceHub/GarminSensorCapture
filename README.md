@@ -79,28 +79,94 @@ Voir `06_release/CHECKLIST_MISE_EN_ROUTE.md` et `04_docs/05_exploitation_guide.m
 
 ---
 
-## Protocole
+## Format des données de sortie
 
-Chaque paquet BLE est un objet JSON v1 :
+L'app Android produit **un fichier JSONL par session** (`{session_id}.jsonl`, exporté en `.zip` via le bouton "Export"). **Une ligne = un paquet** reçu de la montre via BLE.
+
+### Exemple d'un paquet (abrégé)
 
 ```json
 {
-  "pv": 1,
-  "sid": "20240422_143022",
-  "pi": 42,
-  "dtr": 1713794022000,
-  "s": [
-    {"t": 0, "ax": 15.0, "ay": -983.0, "az": 124.0,
-     "gx": 0.5, "gy": -0.3, "gz": 0.1, "hr": 72}
-  ],
-  "gps": {"lat": 48.8566, "lon": 2.3522, "alt": 35.0,
-          "spd": 1.2, "hdg": 270.0, "acc": 5.0, "ts": 1713794022},
-  "meta": {"bat": 85, "temp": 22.5},
-  "ef": 0
+  "received_at": "2026-04-23T12:54:51.872Z",
+  "session_id":  "20260423_125450",
+  "pv":  1,
+  "sid": "20260423_145435",
+  "pi":  3,
+  "dtr": 353029021,
+  "s":   [ /* 25 samples IMU — voir plus bas */ ],
+  "gps": { "lat": 48.8566, "lon": 2.3522, "alt": 35.0,
+           "spd": 1.2, "hdg": 270.0, "acc": 5.0, "ts": 1713794022 },
+  "meta": { "bat": 85, "temp": 22.5 },
+  "ef":  0
 }
 ```
 
-Voir `04_docs/02_protocol_communication.md` pour la documentation complète.
+### Champs au niveau du paquet
+
+| Champ | Type | Unité | Description |
+|-------|------|-------|-------------|
+| `pv` | int | — | Protocol version (= 1) |
+| `sid` | string | — | Session ID de la **montre** (`YYYYMMDD_HHMMSS`, heure locale montre) |
+| `session_id` | string | — | Session ID **Android** (ajouté à la réception). Peut différer de `sid` à cause du fuseau horaire. |
+| `pi` | int | — | Packet index monotone depuis le début de session. Des trous (`pi=3, pi=5, pi=6…`) révèlent les pertes BLE. |
+| `dtr` | int | ms | Device timer = `System.getTimer()` sur la montre = ms depuis boot montre. **Pas un timestamp Unix.** |
+| `received_at` | string | ISO 8601 UTC | Horloge wall-clock Android à la réception du paquet. À utiliser pour l'heure absolue. |
+| `s` | array | — | Batch de samples IMU (25 éléments — voir table suivante) |
+| `gps` | object / null | — | Snapshot GPS si fix valide ; absent si pas de fix ou fix trop ancien (> 5 s) |
+| `meta` | object | — | Métadonnées système (batterie, température) |
+| `ef` | int (bitmask) | — | Error flags : bit 0 sensor, bit 1 GPS, bit 2 buffer overflow, bit 3 partial batch, bit 4 clock skew, bit 5 comm retry |
+
+### Samples IMU (`s[]`, 25 éléments par paquet)
+
+| Champ | Type | Unité | Description |
+|-------|------|-------|-------------|
+| `t` | int | ms | **Période inter-sample** (40 = 25 Hz, 10 = 100 Hz). Constant sur tous les samples d'un batch. Timestamp absolu d'un sample #idx : `dtr + idx * t`. |
+| `ax`, `ay`, `az` | float | milli-g | Accélération sur axes X/Y/Z. Gravité terrestre ≈ 1000 mg sur l'axe vertical (montre au repos, poignet à plat). |
+| `gx`, `gy`, `gz` | float | °/s | Vitesse angulaire gyroscope sur X/Y/Z (~0 au repos). |
+| `mx`, `my`, `mz` | float | µT | Champ magnétique magnétomètre sur X/Y/Z (microtesla). Sensible à l'orientation et aux perturbations métalliques. |
+| `hr` | int | bpm | Fréquence cardiaque instantanée. Lue une seule fois par batch (~1 Hz effective) et **dupliquée** sur les 25 samples. |
+
+### Snapshot GPS (`gps`, présent si fix valide)
+
+| Champ | Type | Unité | Description |
+|-------|------|-------|-------------|
+| `lat` | float | degrés décimaux | Latitude (ex : 48.856614 pour Paris) |
+| `lon` | float | degrés décimaux | Longitude (ex : 2.352222) |
+| `alt` | float | m | Altitude au-dessus du niveau de la mer |
+| `spd` | float | m/s | Vitesse au sol |
+| `hdg` | float | ° (0-359) | Cap (heading), 0 = Nord |
+| `acc` | float | m | Précision horizontale approximative : 5 m bonne, 15 m utilisable, 50 m mauvaise, 100 m non disponible |
+| `ts` | int | secondes Unix | Timestamp du fix GPS (epoch) |
+
+> ⚠️ **Bug v1.0.0** : le champ `alt` contient la valeur d'`acc` mappée (5/15/50/100) au lieu de l'altitude réelle, et `acc` est toujours 0. Corrigé dans la v1.1+.
+
+### Métadonnées (`meta`)
+
+| Champ | Type | Unité | Description |
+|-------|------|-------|-------------|
+| `bat` | int | % | Niveau de batterie montre (0-100) |
+| `temp` | float | °C | Température capteur interne — optionnel, pas toujours présent |
+
+### Fréquences d'acquisition
+
+| Capteur | Fréquence hardware | Fréquence encodée (`t`) | Commentaire |
+|---------|--------------------|-------------------------|-------------|
+| Accéléromètre | 25 Hz (v1.0) / 100 Hz (v1.1+) | 40 / 10 ms | Via `Sensor.registerSensorDataListener` |
+| Gyroscope | 25 Hz (v1.0) / 100 Hz (v1.1+) | 40 / 10 ms | Même batch que accel |
+| Magnétomètre | 25 Hz (limite hardware) | 40 ms (v1.0) / répété 4× (v1.1+) | Sur fēnix, le mag ne monte pas au-dessus de 25 Hz |
+| Fréquence cardiaque | ~1 Hz effective | dupliquée sur le batch | Poll `Sensor.getInfo().heartRate` 1× par batch |
+| GPS | 1 Hz nominal, ~0.5 Hz effective | — | `LOCATION_CONTINUOUS`, fixes > 5 s rejetés |
+
+### Pipeline d'analyse
+
+Le fichier JSONL peut être traité par la pipeline Python (`03_python_analysis/main.py`) qui produit :
+- **`imu_data.csv`** — une ligne par sample IMU, timestamps absolus reconstruits, accel converti en g
+- **`gps_data.csv`** — une ligne par fix GPS
+- **`metrics.json`** — durée, fréquence effective, taux de perte, statistiques (norm accel, plage HR, distance GPS)
+- **`summary.txt`** — rapport lisible
+- **`*.png`** — graphiques (accel XYZ, gyro XYZ, HR, trace GPS, profil altitude)
+
+Voir [`04_docs/02_protocol_communication.md`](04_docs/02_protocol_communication.md) et [`04_docs/03_data_schema.md`](04_docs/03_data_schema.md) pour les détails d'implémentation et le schéma exact des DataFrames Python.
 
 ---
 
