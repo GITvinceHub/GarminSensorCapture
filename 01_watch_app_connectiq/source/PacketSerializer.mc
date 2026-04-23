@@ -23,21 +23,25 @@ class PacketSerializer {
     static const PROTOCOL_VERSION = 1;
 
     //! Serialize a complete sensor packet to JSON string.
-    //! @param sessionId  Session ID string
+    //! @param sessionId   Session ID string
     //! @param packetIndex Monotonic packet counter
     //! @param deviceTime  System.getTimer() value at serialization time
     //! @param samples     Array of sample dictionaries
     //! @param gpsData     GPS dictionary (may be null)
     //! @param battery     Battery level 0-100
+    //! @param spo2        Latest SpO2 value 0-100, or null if none (included in meta)
+    //! @param spo2AgeS    Age of the SpO2 measurement in seconds, or null
     //! @param errorFlags  Initial error flags bitmask
     //! @return JSON string ≤ MAX_PACKET_SIZE chars, or null on fatal error
     static function serializePacket(
-        sessionId  as String,
+        sessionId   as String,
         packetIndex as Number,
         deviceTime  as Number,
         samples     as Array<Dictionary>,
         gpsData     as Dictionary or Null,
         battery     as Number,
+        spo2        as Number or Null,
+        spo2AgeS    as Number or Null,
         errorFlags  as Number
     ) as String or Null {
 
@@ -66,7 +70,14 @@ class PacketSerializer {
             }
 
             // ── Build meta object ───────────────────────────────────
-            var metaStr = "{\"bat\":" + battery.toString() + "}";
+            var metaStr = "{\"bat\":" + battery.toString();
+            if (spo2 != null) {
+                metaStr += ",\"spo2\":" + spo2.toString();
+                if (spo2AgeS != null) {
+                    metaStr += ",\"spo2_age_s\":" + spo2AgeS.toString();
+                }
+            }
+            metaStr += "}";
 
             // ── Assemble root object ────────────────────────────────
             json = "{";

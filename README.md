@@ -146,6 +146,10 @@ L'app Android produit **un fichier JSONL par session** (`{session_id}.jsonl`, ex
 |-------|------|-------|-------------|
 | `bat` | int | % | Niveau de batterie montre (0-100) |
 | `temp` | float | °C | Température capteur interne — optionnel, pas toujours présent |
+| `spo2` | int | % | Saturation en oxygène la plus récente connue (0-100). Absent si aucune mesure Pulse Ox n'a été effectuée. |
+| `spo2_age_s` | int | s | Âge de la mesure `spo2` en secondes. Peut valoir plusieurs minutes (on-demand) voire heures (sans All-day Pulse Ox activé). |
+
+> ℹ️ **Sur la SpO2** : la Pulse Ox n'est **pas un capteur continu**. La fēnix 8 Pro mesure la SpO2 soit sur demande (~30 s via widget/bouton), soit périodiquement si "All-day Pulse Ox" est activé dans les paramètres montre (coût batterie important). Le champ `spo2` reflète la dernière mesure connue à l'instant du paquet, pas une mesure temps réel.
 
 ### Fréquences d'acquisition
 

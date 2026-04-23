@@ -1,6 +1,7 @@
 import Toybox.Sensor;
 import Toybox.Lang;
 import Toybox.System;
+import Toybox.Time;
 
 //! Manages IMU sensor registration and data collection.
 //! Reads: accelerometer (x,y,z), gyroscope (x,y,z), magnetometer (x,y,z), HR.
@@ -227,5 +228,46 @@ class SensorManager {
     //! Check if the sensor is currently registered.
     function isRegistered() as Boolean {
         return _isRegistered;
+    }
+
+    //! Get the latest SpO2 (Pulse Ox) measurement along with its age in seconds.
+    //!
+    //! SpO2 on Garmin watches is NOT a continuous sensor — it's sampled
+    //! on-demand (~30 s), or periodically if "All-day Pulse Ox" is enabled
+    //! (typically one measurement per 15-60 min), or during sleep.
+    //! This method reads the newest entry from SensorHistory, which is the
+    //! most recent SpO2 value known to the watch regardless of when it was
+    //! captured (possibly minutes or hours ago).
+    //!
+    //! @return Dictionary with:
+    //!   "value" => Number (0-100) or null if no measurement ever
+    //!   "ageS"  => Number (seconds since measurement) or null
+    function getSpo2Snapshot() as Dictionary {
+        var spo2 = null;
+        var ageS = null;
+        try {
+            if (Toybox has :SensorHistory
+                && Toybox.SensorHistory has :getOxygenSaturationHistory) {
+                var iter = Toybox.SensorHistory.getOxygenSaturationHistory({
+                    :period => 1,
+                    :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+                });
+                if (iter != null) {
+                    var sample = iter.next();
+                    if (sample != null && sample.data != null) {
+                        spo2 = sample.data.toNumber();
+                        if (sample has :when && sample.when != null) {
+                            var nowSec  = Time.now().value();
+                            var thenSec = sample.when.value();
+                            ageS = nowSec - thenSec;
+                            if (ageS < 0) { ageS = 0; }
+                        }
+                    }
+                }
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SensorManager: SpO2 read failed: " + ex.getErrorMessage());
+        }
+        return { "value" => spo2, "ageS" => ageS };
     }
 }

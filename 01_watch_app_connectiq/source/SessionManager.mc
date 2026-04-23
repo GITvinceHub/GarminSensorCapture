@@ -212,6 +212,15 @@ class SessionManager {
         // Get battery level
         var battery = System.getSystemStats().battery.toNumber();
 
+        // Get latest SpO2 snapshot (null if no measurement ever recorded)
+        var spo2Value = null;
+        var spo2AgeS  = null;
+        if (_sensorManager != null) {
+            var snap = (_sensorManager as SensorManager).getSpo2Snapshot();
+            spo2Value = snap.get("value");
+            spo2AgeS  = snap.get("ageS");
+        }
+
         // Serialize packet
         var errorFlags = 0;
         if (gpsData == null) {
@@ -225,6 +234,8 @@ class SessionManager {
             samples,
             gpsData,
             battery,
+            spo2Value,
+            spo2AgeS,
             errorFlags
         );
 
