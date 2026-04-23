@@ -1,0 +1,25 @@
+<properties>
+    <!-- UUID of the companion Android app — must match the id in manifest.xml -->
+    <property id="CompanionAppId" type="string">a3b4c5d6-e7f8-1234-abcd-ef0123456789</property>
+
+    <!-- Maximum number of packets to buffer in memory on the watch (H-005) -->
+    <property id="MaxQueueSize" type="number">100</property>
+
+    <!-- Number of IMU samples per batch packet (H-001/H-002: 25 Hz × 1s) -->
+    <property id="BatchSize" type="number">25</property>
+
+    <!-- Batch timeout in milliseconds (send even if batch not full) -->
+    <property id="BatchTimeoutMs" type="number">1000</property>
+
+    <!-- BLE reconnect interval in milliseconds (H-006: 30s) -->
+    <property id="ReconnectIntervalMs" type="number">30000</property>
+
+    <!-- Enable/disable magnetometer capture (H-015) -->
+    <property id="EnableMagnetometer" type="boolean">true</property>
+
+    <!-- Enable/disable detailed debug logging (disable in production) -->
+    <property id="DebugLogging" type="boolean">false</property>
+
+    <!-- Protocol version — do not change unless updating protocol schema -->
+    <property id="ProtocolVersion" type="number">1</property>
+</properties>

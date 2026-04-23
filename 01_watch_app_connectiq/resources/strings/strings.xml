@@ -1,0 +1,16 @@
+<strings>
+  <string id="app_name">SensorCapture</string>
+  <string id="status_idle">IDLE</string>
+  <string id="status_recording">RECORDING</string>
+  <string id="status_stopping">STOPPING</string>
+  <string id="label_packets">Packets:</string>
+  <string id="label_gps">GPS:</string>
+  <string id="label_link">Link:</string>
+  <string id="label_error">ERR:</string>
+  <string id="gps_fix">FIX</string>
+  <string id="gps_nofix">NO FIX</string>
+  <string id="link_connected">CONN</string>
+  <string id="link_disconnected">DISC</string>
+  <string id="start_session">Start Session</string>
+  <string id="stop_session">Stop Session</string>
+</strings>

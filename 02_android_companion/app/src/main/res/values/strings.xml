@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SensorCapture</string>
+
+    <!-- Watch app UUID — must match manifest.xml in 01_watch_app_connectiq -->
+    <string name="watch_app_id">a3b4c5d6-e7f8-1234-abcd-ef0123456789</string>
+
+    <!-- Button labels -->
+    <string name="start_session">Start Session</string>
+    <string name="stop_session">Stop Session</string>
+    <string name="export_jsonl">Export JSONL</string>
+    <string name="export_zip">Export ZIP</string>
+
+    <!-- Status labels -->
+    <string name="sdk_not_initialized">SDK: NOT_INITIALIZED</string>
+    <string name="sdk_ready">SDK: READY</string>
+    <string name="sdk_error">SDK: ERROR</string>
+    <string name="watch_connected">Watch: CONNECTED</string>
+    <string name="watch_disconnected">Watch: DISCONNECTED</string>
+    <string name="watch_not_paired">Watch: NOT_PAIRED</string>
+
+    <!-- Error messages -->
+    <string name="err_no_watch">No watch connected</string>
+    <string name="err_session_active">Session already active</string>
+    <string name="err_no_data">No data to export</string>
+    <string name="err_export_failed">Export failed</string>
+    <string name="err_permissions">Bluetooth permissions required</string>
+
+    <!-- Notifications -->
+    <string name="notif_channel_name">Sensor Capture</string>
+    <string name="notif_recording">Recording sensor data...</string>
+
+    <!-- About -->
+    <string name="about_version">Version 1.0.0</string>
+    <string name="about_description">Garmin fēnix 8 Pro sensor capture companion app</string>
+</resources>

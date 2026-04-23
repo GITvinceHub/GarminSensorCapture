@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="@color/black"
+    tools:context=".MainActivity">
+
+    <!-- App title -->
+    <TextView
+        android:id="@+id/tvTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:textColor="@color/white"
+        android:gravity="center"
+        android:paddingBottom="12dp"/>
+
+    <!-- Scrollable status area -->
+    <ScrollView
+        android:id="@+id/scrollView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Section: SDK & Watch -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="─── Connection ───"
+                android:textColor="#888888"
+                android:textSize="11sp"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp"/>
+
+            <TextView
+                android:id="@+id/tvSdkStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="SDK: NOT_INITIALIZED"
+                android:textColor="#FFAAAA"
+                android:textSize="14sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvWatchStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Watch: UNKNOWN"
+                android:textColor="#AAAAFF"
+                android:textSize="14sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvWatchId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ID: -"
+                android:textColor="#AAAAAA"
+                android:textSize="13sp"
+                android:fontFamily="monospace"/>
+
+            <!-- Section: Session -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="─── Session ───"
+                android:textColor="#888888"
+                android:textSize="11sp"
+                android:paddingTop="12dp"
+                android:paddingBottom="4dp"/>
+
+            <TextView
+                android:id="@+id/tvSessionId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Session: -"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:fontFamily="monospace"/>
+
+            <!-- Section: Data -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="─── Data ───"
+                android:textColor="#888888"
+                android:textSize="11sp"
+                android:paddingTop="12dp"
+                android:paddingBottom="4dp"/>
+
+            <TextView
+                android:id="@+id/tvPackets"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Packets: 0"
+                android:textColor="#AAFFAA"
+                android:textSize="14sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvFileSize"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="File: 0 B"
+                android:textColor="#AAFFAA"
+                android:textSize="14sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvThroughput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Throughput: 0.00 pkt/s"
+                android:textColor="#AAFFAA"
+                android:textSize="14sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvLoss"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Loss: 0.0% (0 gaps)"
+                android:textColor="#FFCC44"
+                android:textSize="13sp"
+                android:fontFamily="monospace"/>
+
+            <!-- Error display -->
+            <TextView
+                android:id="@+id/tvError"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#FF4444"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:paddingTop="4dp"
+                android:visibility="gone"/>
+
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- Bottom control buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="8dp">
+
+        <!-- Start/Stop session -->
+        <Button
+            android:id="@+id/btnStartStop"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="@string/start_session"
+            android:textSize="16sp"
+            android:backgroundTint="#2196F3"
+            android:layout_marginBottom="8dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <!-- Export JSONL -->
+            <Button
+                android:id="@+id/btnExportJsonl"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:text="@string/export_jsonl"
+                android:textSize="13sp"
+                android:enabled="false"
+                android:backgroundTint="#4CAF50"
+                android:layout_marginEnd="4dp"/>
+
+            <!-- Export ZIP -->
+            <Button
+                android:id="@+id/btnExportZip"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:text="@string/export_zip"
+                android:textSize="13sp"
+                android:enabled="false"
+                android:backgroundTint="#FF9800"
+                android:layout_marginStart="4dp"/>
+
+        </LinearLayout>
+    </LinearLayout>
+
+</LinearLayout>
