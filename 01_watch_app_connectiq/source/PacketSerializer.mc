@@ -137,12 +137,45 @@ class PacketSerializer {
         deviceInfo  as Dictionary,
         histories   as Dictionary
     ) as String or Null {
+        return _serializeMetaPacket("header", 0, sessionId, deviceTime,
+            userProfile, deviceInfo, histories);
+    }
+
+    //! Serialize a session footer packet — sent once at stopSession().
+    //! Contains only the in-session histories (filtered to ts >= sessionStart).
+    //! No user/device block since those were already sent in the header.
+    //!
+    //! @param sessionId    Session ID string
+    //! @param packetIndex  Packet index (use _packetIndex at stop time to keep sequence)
+    //! @param deviceTime   System.getTimer() at footer build
+    //! @param histories    Dict of history arrays (in-session only)
+    //! @return JSON string ≤ MAX_PACKET_SIZE chars, or null on error
+    static function serializeFooterPacket(
+        sessionId   as String,
+        packetIndex as Number,
+        deviceTime  as Number,
+        histories   as Dictionary
+    ) as String or Null {
+        return _serializeMetaPacket("footer", packetIndex, sessionId, deviceTime,
+            null, null, histories);
+    }
+
+    //! Internal helper used by serializeHeaderPacket and serializeFooterPacket.
+    private static function _serializeMetaPacket(
+        packetType  as String,
+        packetIndex as Number,
+        sessionId   as String,
+        deviceTime  as Number,
+        userProfile as Dictionary or Null,
+        deviceInfo  as Dictionary or Null,
+        histories   as Dictionary or Null
+    ) as String or Null {
         try {
             var json = "{";
             json += "\"pv\":" + PROTOCOL_VERSION.toString() + ",";
-            json += "\"pt\":\"header\",";
+            json += "\"pt\":\"" + packetType + "\",";
             json += "\"sid\":\"" + sessionId + "\",";
-            json += "\"pi\":0,";
+            json += "\"pi\":" + packetIndex.toString() + ",";
             json += "\"dtr\":" + deviceTime.toString();
 
             // user profile
@@ -172,19 +205,19 @@ class PacketSerializer {
             }
             json += "}";
 
-            // If we overflowed, return a minimal header with empty history.
+            // If we overflowed, return a minimal meta packet with empty history.
             if (json.length() > MAX_PACKET_SIZE) {
                 json = "{\"pv\":" + PROTOCOL_VERSION.toString()
-                     + ",\"pt\":\"header\""
+                     + ",\"pt\":\"" + packetType + "\""
                      + ",\"sid\":\"" + sessionId + "\""
-                     + ",\"pi\":0"
+                     + ",\"pi\":" + packetIndex.toString()
                      + ",\"dtr\":" + deviceTime.toString()
                      + ",\"history\":{},\"trunc\":true}";
             }
 
             return json;
         } catch (ex instanceof Lang.Exception) {
-            System.println("PacketSerializer: header serialization failed: " + ex.getErrorMessage());
+            System.println("PacketSerializer: meta packet serialization failed: " + ex.getErrorMessage());
             return null;
         }
     }

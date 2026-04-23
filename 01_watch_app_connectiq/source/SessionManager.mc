@@ -27,6 +27,10 @@ class SessionManager {
     //! Total error count for this session
     private var _errorCount as Number;
 
+    //! Unix timestamp (seconds) when the current session started.
+    //! Used to filter in-session history entries for the footer packet.
+    private var _sessionStartTsS as Number;
+
     //! Event marks list (timestamps of marked events)
     private var _eventMarks as Array<Number>;
 
@@ -41,12 +45,13 @@ class SessionManager {
 
     //! Constructor — does NOT start capturing; call initialize() first
     function initialize() {
-        _state        = STATE_IDLE;
-        _sessionId    = "";
-        _packetIndex  = 0;
-        _errorCount   = 0;
-        _eventMarks   = [] as Array<Number>;
-        _initialized  = false;
+        _state           = STATE_IDLE;
+        _sessionId       = "";
+        _packetIndex     = 0;
+        _errorCount      = 0;
+        _eventMarks      = [] as Array<Number>;
+        _sessionStartTsS = 0;
+        _initialized     = false;
         _sensorManager   = null;
         _positionManager = null;
         _batchManager    = null;
@@ -96,10 +101,11 @@ class SessionManager {
             return;
         }
 
-        _sessionId   = generateSessionId();
-        _packetIndex = 0;
-        _errorCount  = 0;
-        _eventMarks  = [] as Array<Number>;
+        _sessionId       = generateSessionId();
+        _packetIndex     = 0;
+        _errorCount      = 0;
+        _eventMarks      = [] as Array<Number>;
+        _sessionStartTsS = Time.now().value();
 
         // ── Build and send the session header packet FIRST ─────────
         _sendHeaderPacket();
@@ -142,14 +148,15 @@ class SessionManager {
         }
         deviceInfo.put("app_version", "1.2.0");
 
+        // Header histories = pre-session context (no cutoff → pass 0 for minTsS)
         var histories = {
-            "hr"       => sm.getHrHistory(MAX_HIST),
-            "hrv"      => sm.getHrvHistory(MAX_HIST),
-            "spo2"     => sm.getSpo2History(MAX_HIST),
-            "stress"   => sm.getStressHistory(MAX_HIST),
-            "pressure" => sm.getPressureHistory(MAX_HIST),
-            "temp"     => sm.getTemperatureHistory(MAX_HIST),
-            "elev"     => sm.getElevationHistory(MAX_HIST)
+            "hr"       => sm.getHrHistory(MAX_HIST, 0),
+            "hrv"      => sm.getHrvHistory(MAX_HIST, 0),
+            "spo2"     => sm.getSpo2History(MAX_HIST, 0),
+            "stress"   => sm.getStressHistory(MAX_HIST, 0),
+            "pressure" => sm.getPressureHistory(MAX_HIST, 0),
+            "temp"     => sm.getTemperatureHistory(MAX_HIST, 0),
+            "elev"     => sm.getElevationHistory(MAX_HIST, 0)
         } as Dictionary;
 
         var header = PacketSerializer.serializeHeaderPacket(
@@ -164,6 +171,40 @@ class SessionManager {
         }
     }
 
+    //! Build and transmit the session footer packet (pt:"footer") with sensor
+    //! histories captured during the session (ts >= _sessionStartTsS).
+    //! Called from stopSession() before sensors are unregistered.
+    private function _sendFooterPacket() as Void {
+        if (_sensorManager == null || _commManager == null) { return; }
+        if (_sessionStartTsS <= 0) { return; }
+
+        // Higher cap than header since we want all in-session samples. The
+        // per-type serializer truncates if the aggregate overflows MAX_PACKET_SIZE.
+        var MAX_HIST = 200;
+
+        var sm = _sensorManager as SensorManager;
+
+        var histories = {
+            "hr"       => sm.getHrHistory(MAX_HIST, _sessionStartTsS),
+            "hrv"      => sm.getHrvHistory(MAX_HIST, _sessionStartTsS),
+            "spo2"     => sm.getSpo2History(MAX_HIST, _sessionStartTsS),
+            "stress"   => sm.getStressHistory(MAX_HIST, _sessionStartTsS),
+            "pressure" => sm.getPressureHistory(MAX_HIST, _sessionStartTsS),
+            "temp"     => sm.getTemperatureHistory(MAX_HIST, _sessionStartTsS),
+            "elev"     => sm.getElevationHistory(MAX_HIST, _sessionStartTsS)
+        } as Dictionary;
+
+        var footer = PacketSerializer.serializeFooterPacket(
+            _sessionId, _packetIndex, System.getTimer(), histories
+        );
+
+        if (footer != null) {
+            (_commManager as CommunicationManager).sendPacket(footer);
+            System.println("SessionManager: footer packet queued ("
+                + footer.length() + " chars)");
+        }
+    }
+
     //! Stop the current capture session gracefully.
     //! Flushes any pending batch, then transitions to IDLE.
     function stopSession() as Void {
@@ -174,8 +215,12 @@ class SessionManager {
         _state = STATE_STOPPING;
         System.println("SessionManager: stopping session " + _sessionId);
 
-        // Flush remaining samples
+        // Flush remaining samples FIRST (may trigger one more data packet)
         (_batchManager as BatchManager).flush();
+
+        // Send footer packet with in-session histories (before unregistering
+        // sensors so the comm channel is still active)
+        _sendFooterPacket();
 
         // Unregister sensors
         (_sensorManager   as SensorManager).unregister();

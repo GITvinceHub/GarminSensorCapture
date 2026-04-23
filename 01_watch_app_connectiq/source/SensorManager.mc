@@ -9,9 +9,9 @@ import Toybox.UserProfile;
 //! Reads: accelerometer (x,y,z), gyroscope (x,y,z), magnetometer (x,y,z), HR.
 //!
 //! Uses Sensor.registerSensorDataListener which delivers batched samples.
-//! Accel and gyro run at PRIMARY_RATE_HZ; magnetometer runs at MAG_RATE_HZ
-//! (typically lower). For each primary sample i we use mag sample at index
-//! i / MAG_DOWNSAMPLE_RATIO.
+//! Accel and gyro run at PRIMARY_RATE_HZ (100 Hz); magnetometer at MAG_RATE_HZ
+//! (50 Hz). For each primary sample i we use mag sample at index
+//! i / MAG_DOWNSAMPLE_RATIO (= 2).
 //!
 //! HYPOTHESIS H-001: Accelerometer at 100 Hz via Sensor.registerSensorDataListener
 //! HYPOTHESIS H-013: Accelerometer values in milli-g
@@ -26,11 +26,11 @@ class SensorManager {
     //! Primary sample rate (accel + gyro)
     private const PRIMARY_RATE_HZ = 100;
 
-    //! Magnetometer sample rate — usually 25 Hz max on Garmin hardware
-    private const MAG_RATE_HZ = 25;
+    //! Magnetometer sample rate — 50 Hz max on fēnix 8 hardware
+    private const MAG_RATE_HZ = 50;
 
     //! Ratio primary/mag — used to index mag values across primary samples
-    private const MAG_DOWNSAMPLE_RATIO = 4;  // 100 / 25
+    private const MAG_DOWNSAMPLE_RATIO = 2;  // 100 / 50
 
     //! Callback to deliver samples to SessionManager
     private var _callback as SampleCallback;
@@ -74,7 +74,7 @@ class SensorManager {
             return;
         }
 
-        // Accel/gyro at PRIMARY_RATE_HZ (100 Hz), mag at MAG_RATE_HZ (25 Hz).
+        // Accel/gyro at PRIMARY_RATE_HZ (100 Hz), mag at MAG_RATE_HZ (50 Hz).
         // HR is polled separately via Sensor.getInfo() — batched HeartRateData
         // only exposes heartBeatIntervals (RR ms), not bpm.
         var options = {
@@ -341,9 +341,11 @@ class SensorManager {
 
     //! Generic history reader — returns an Array of [ts_unix_s, value] pairs,
     //! newest first, capped at maxN entries.
-    //! @param iter  A SensorHistoryIterator (may be null if permission/support missing)
-    //! @param maxN  Max entries to return
-    private function _readHistory(iter, maxN as Number) as Array {
+    //! @param iter   A SensorHistoryIterator (may be null if permission/support missing)
+    //! @param maxN   Max entries to return
+    //! @param minTsS Cutoff timestamp in Unix seconds: stop when entry is older
+    //!               (i.e. ts < minTsS). Pass 0 to disable the cutoff.
+    private function _readHistory(iter, maxN as Number, minTsS as Number) as Array {
         var out = [] as Array;
         if (iter == null) { return out; }
         try {
@@ -356,6 +358,10 @@ class SensorManager {
                 if (s has :when && s.when != null) {
                     tsS = s.when.value();
                 }
+                // newest-first: once we see an entry older than cutoff, stop.
+                if (minTsS > 0 && tsS > 0 && tsS < minTsS) {
+                    break;
+                }
                 out.add([tsS, s.data]);
                 count++;
             }
@@ -366,80 +372,80 @@ class SensorManager {
     }
 
     //! Get last N HR samples (bpm).
-    function getHrHistory(maxN as Number) as Array {
+    function getHrHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getHeartRateHistory)) { return []; }
         var iter = Toybox.SensorHistory.getHeartRateHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N HRV samples (typically ms RMSSD).
-    function getHrvHistory(maxN as Number) as Array {
+    function getHrvHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getHeartRateVariabilityHistory)) { return []; }
         var iter = Toybox.SensorHistory.getHeartRateVariabilityHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N SpO2 samples (%).
-    function getSpo2History(maxN as Number) as Array {
+    function getSpo2History(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getOxygenSaturationHistory)) { return []; }
         var iter = Toybox.SensorHistory.getOxygenSaturationHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N stress samples (0-100).
-    function getStressHistory(maxN as Number) as Array {
+    function getStressHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getStressHistory)) { return []; }
         var iter = Toybox.SensorHistory.getStressHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N pressure samples (Pa).
-    function getPressureHistory(maxN as Number) as Array {
+    function getPressureHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getPressureHistory)) { return []; }
         var iter = Toybox.SensorHistory.getPressureHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N temperature samples (°C).
-    function getTemperatureHistory(maxN as Number) as Array {
+    function getTemperatureHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getTemperatureHistory)) { return []; }
         var iter = Toybox.SensorHistory.getTemperatureHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get last N barometric elevation samples (m).
-    function getElevationHistory(maxN as Number) as Array {
+    function getElevationHistory(maxN as Number, minTsS as Number) as Array {
         if (!(Toybox has :SensorHistory)) { return []; }
         if (!(Toybox.SensorHistory has :getElevationHistory)) { return []; }
         var iter = Toybox.SensorHistory.getElevationHistory({
             :period => 1,
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
-        return _readHistory(iter, maxN);
+        return _readHistory(iter, maxN, minTsS);
     }
 
     //! Get the latest SpO2 (Pulse Ox) measurement along with its age in seconds.
