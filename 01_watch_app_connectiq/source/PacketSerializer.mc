@@ -23,26 +23,27 @@ class PacketSerializer {
     static const PROTOCOL_VERSION = 1;
 
     //! Serialize a complete sensor packet to JSON string.
-    //! @param sessionId   Session ID string
-    //! @param packetIndex Monotonic packet counter
-    //! @param deviceTime  System.getTimer() value at serialization time
-    //! @param samples     Array of sample dictionaries
-    //! @param gpsData     GPS dictionary (may be null)
-    //! @param battery     Battery level 0-100
-    //! @param spo2        Latest SpO2 value 0-100, or null if none (included in meta)
-    //! @param spo2AgeS    Age of the SpO2 measurement in seconds, or null
-    //! @param errorFlags  Initial error flags bitmask
+    //! @param sessionId    Session ID string
+    //! @param packetIndex  Monotonic packet counter
+    //! @param deviceTime   System.getTimer() value at serialization time
+    //! @param samples      Array of sample dictionaries
+    //! @param rrIntervals  Array of RR intervals (ms) for this batch, or null
+    //! @param gpsData      GPS dictionary (may be null)
+    //! @param metaDict     Dictionary of meta fields (bat required; spo2, pres_pa,
+    //!                     alt_baro_m, temp_c, cadence, power_w, heading_rad,
+    //!                     resp, stress, body_batt, steps_day, dist_day_m,
+    //!                     floors_day optional)
+    //! @param errorFlags   Initial error flags bitmask
     //! @return JSON string ≤ MAX_PACKET_SIZE chars, or null on fatal error
     static function serializePacket(
-        sessionId   as String,
-        packetIndex as Number,
-        deviceTime  as Number,
-        samples     as Array<Dictionary>,
-        gpsData     as Dictionary or Null,
-        battery     as Number,
-        spo2        as Number or Null,
-        spo2AgeS    as Number or Null,
-        errorFlags  as Number
+        sessionId    as String,
+        packetIndex  as Number,
+        deviceTime   as Number,
+        samples      as Array<Dictionary>,
+        rrIntervals  as Array or Null,
+        gpsData      as Dictionary or Null,
+        metaDict     as Dictionary,
+        errorFlags   as Number
     ) as String or Null {
 
         if (samples == null || samples.size() == 0) {
@@ -69,17 +70,22 @@ class PacketSerializer {
                 gpsStr = _serializeGps(gpsData as Dictionary);
             }
 
-            // ── Build meta object ───────────────────────────────────
-            var metaStr = "{\"bat\":" + battery.toString();
-            if (spo2 != null) {
-                metaStr += ",\"spo2\":" + spo2.toString();
-                if (spo2AgeS != null) {
-                    metaStr += ",\"spo2_age_s\":" + spo2AgeS.toString();
+            // ── Build meta object from dict ─────────────────────────
+            var metaStr = _serializeMeta(metaDict);
+
+            // ── Build RR intervals array ────────────────────────────
+            var rrStr = "";
+            if (rrIntervals != null && rrIntervals.size() > 0) {
+                rrStr = "[";
+                for (var i = 0; i < rrIntervals.size(); i++) {
+                    if (i > 0) { rrStr += ","; }
+                    rrStr += rrIntervals[i].toString();
                 }
+                rrStr += "]";
             }
-            metaStr += "}";
 
             // ── Assemble root object ────────────────────────────────
+            var battery = (metaDict.get("bat") != null) ? metaDict.get("bat") as Number : 0;
             json = "{";
             json += "\"pv\":" + PROTOCOL_VERSION.toString() + ",";
             json += "\"sid\":\"" + sessionId + "\",";
@@ -87,6 +93,9 @@ class PacketSerializer {
             json += "\"dtr\":" + deviceTime.toString() + ",";
             json += "\"s\":" + samplesStr + ",";
 
+            if (rrStr.length() > 0) {
+                json += "\"rr\":" + rrStr + ",";
+            }
             if (gpsStr.length() > 0) {
                 json += "\"gps\":" + gpsStr + ",";
             }
@@ -97,7 +106,6 @@ class PacketSerializer {
 
             // ── Size guard ──────────────────────────────────────────
             if (json.length() > MAX_PACKET_SIZE) {
-                // This should not happen given we pre-check, but guard anyway
                 ef |= EF_PARTIAL_PACKET;
                 json = _truncateToMaxSize(
                     sessionId, packetIndex, deviceTime, battery, ef
@@ -110,6 +118,143 @@ class PacketSerializer {
         }
 
         return json;
+    }
+
+    //! Serialize a session header packet — sent once at session start.
+    //! Contains user profile, device info, and (capped) sensor histories.
+    //! Uses a separate packet type `pt:"header"` so consumers can discriminate.
+    //!
+    //! @param sessionId    Session ID string
+    //! @param deviceTime   System.getTimer() value at header build time
+    //! @param userProfile  Dict with weight_g, height_cm, birth_year, gender, hr_max, hr_zones (all optional)
+    //! @param deviceInfo   Dict with model, firmware, app_version (optional)
+    //! @param histories    Dict of history arrays keyed by name (e.g. "hr", "spo2", "stress")
+    //! @return JSON string ≤ MAX_PACKET_SIZE chars, or null on error
+    static function serializeHeaderPacket(
+        sessionId   as String,
+        deviceTime  as Number,
+        userProfile as Dictionary,
+        deviceInfo  as Dictionary,
+        histories   as Dictionary
+    ) as String or Null {
+        try {
+            var json = "{";
+            json += "\"pv\":" + PROTOCOL_VERSION.toString() + ",";
+            json += "\"pt\":\"header\",";
+            json += "\"sid\":\"" + sessionId + "\",";
+            json += "\"pi\":0,";
+            json += "\"dtr\":" + deviceTime.toString();
+
+            // user profile
+            if (userProfile != null && userProfile.size() > 0) {
+                json += ",\"user\":" + _serializeFlatDict(userProfile);
+            }
+            // device info
+            if (deviceInfo != null && deviceInfo.size() > 0) {
+                json += ",\"device\":" + _serializeFlatDict(deviceInfo);
+            }
+
+            // histories: each is an array of [ts_s, value] pairs
+            if (histories != null && histories.size() > 0) {
+                json += ",\"history\":{";
+                var keys = histories.keys() as Array;
+                var first = true;
+                for (var i = 0; i < keys.size(); i++) {
+                    var k = keys[i] as String;
+                    var arr = histories.get(k) as Array;
+                    if (arr == null || arr.size() == 0) { continue; }
+                    if (!first) { json += ","; }
+                    first = false;
+                    json += "\"" + k + "\":" + _serializeHistoryArray(arr,
+                        MAX_PACKET_SIZE - json.length() - 200);
+                }
+                json += "}";
+            }
+            json += "}";
+
+            // If we overflowed, return a minimal header with empty history.
+            if (json.length() > MAX_PACKET_SIZE) {
+                json = "{\"pv\":" + PROTOCOL_VERSION.toString()
+                     + ",\"pt\":\"header\""
+                     + ",\"sid\":\"" + sessionId + "\""
+                     + ",\"pi\":0"
+                     + ",\"dtr\":" + deviceTime.toString()
+                     + ",\"history\":{},\"trunc\":true}";
+            }
+
+            return json;
+        } catch (ex instanceof Lang.Exception) {
+            System.println("PacketSerializer: header serialization failed: " + ex.getErrorMessage());
+            return null;
+        }
+    }
+
+    //! Serialize a Dictionary as flat JSON (no nested objects, scalar values only).
+    private static function _serializeFlatDict(d as Dictionary) as String {
+        var out = "{";
+        var keys = d.keys() as Array;
+        for (var i = 0; i < keys.size(); i++) {
+            var k = keys[i] as String;
+            var v = d.get(k);
+            if (v == null) { continue; }
+            if (i > 0 && out.length() > 1) { out += ","; }
+            out += "\"" + k + "\":";
+            if (v instanceof String) {
+                out += "\"" + v + "\"";
+            } else if (v instanceof Float) {
+                out += (v as Float).format("%.3f");
+            } else {
+                out += v.toString();
+            }
+        }
+        out += "}";
+        return out;
+    }
+
+    //! Serialize the meta Dictionary, preserving field order with "bat" first.
+    private static function _serializeMeta(m as Dictionary) as String {
+        var out = "{";
+        var bat = m.get("bat");
+        out += "\"bat\":" + (bat != null ? bat.toString() : "0");
+
+        var keys = m.keys() as Array;
+        for (var i = 0; i < keys.size(); i++) {
+            var k = keys[i] as String;
+            if (k.equals("bat")) { continue; }
+            var v = m.get(k);
+            if (v == null) { continue; }
+            out += ",\"" + k + "\":";
+            if (v instanceof String) {
+                out += "\"" + v + "\"";
+            } else if (v instanceof Float) {
+                out += (v as Float).format("%.3f");
+            } else {
+                out += v.toString();
+            }
+        }
+        out += "}";
+        return out;
+    }
+
+    //! Serialize a history array (list of [ts_s, value] pairs), stopping
+    //! before sizeBudget characters are consumed. Values are numeric.
+    private static function _serializeHistoryArray(arr as Array, sizeBudget as Number) as String {
+        var out = "[";
+        var used = 1;
+        for (var i = 0; i < arr.size(); i++) {
+            var entry = arr[i] as Array;
+            if (entry == null || entry.size() < 2) { continue; }
+            var ts = entry[0];
+            var v  = entry[1];
+            var pair = "[" + ts.toString() + "," + v.toString() + "]";
+            var needed = pair.length() + (i > 0 ? 1 : 0);
+            if (used + needed + 1 > sizeBudget) { break; }
+            if (i > 0 && out.length() > 1) { out += ","; used += 1; }
+            out += pair;
+            used += pair.length();
+        }
+        out += "]";
+        return out;
     }
 
     //! Serialize the samples array, stopping before MAX_PACKET_SIZE.

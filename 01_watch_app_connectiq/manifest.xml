@@ -6,7 +6,7 @@
                     minSdkVersion="3.3.0"
                     name="@Strings.app_name"
                     type="watch-app"
-                    version="1.0.0">
+                    version="1.2.0">
         <iq:products>
             <iq:product id="fenix7"/>
             <iq:product id="fenix7s"/>
@@ -26,6 +26,7 @@
             <iq:uses-permission id="Positioning"/>
             <iq:uses-permission id="Communications"/>
             <iq:uses-permission id="FitContributor"/>
+            <iq:uses-permission id="UserProfile"/>
         </iq:permissions>
         <iq:languages>
             <iq:language>eng</iq:language>

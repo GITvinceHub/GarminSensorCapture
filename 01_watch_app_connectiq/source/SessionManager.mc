@@ -89,6 +89,8 @@ class SessionManager {
 
     //! Start a new capture session.
     //! Generates a session ID and activates all sensors.
+    //! Also builds and sends a session header packet containing user profile,
+    //! device info and (capped) sensor histories.
     function startSession() as Void {
         if (_state != STATE_IDLE) {
             return;
@@ -99,12 +101,67 @@ class SessionManager {
         _errorCount  = 0;
         _eventMarks  = [] as Array<Number>;
 
+        // ── Build and send the session header packet FIRST ─────────
+        _sendHeaderPacket();
+
         (_sensorManager   as SensorManager).register();
         (_positionManager as PositionManager).enable();
         (_batchManager    as BatchManager).reset();
 
         _state = STATE_RECORDING;
         System.println("SessionManager: started session " + _sessionId);
+    }
+
+    //! Build and transmit the session header packet (pt:"header") with user
+    //! profile, device info and sensor histories. Errors are ignored (the
+    //! main data stream proceeds either way).
+    private function _sendHeaderPacket() as Void {
+        if (_sensorManager == null || _commManager == null) { return; }
+
+        // Max history entries per type — tuned to keep the header within
+        // MAX_PACKET_SIZE when aggregated across 7 history streams.
+        var MAX_HIST = 60;
+
+        var sm = _sensorManager as SensorManager;
+
+        var userProfile = sm.getUserProfile();
+
+        var deviceInfo = {} as Dictionary;
+        // Device info from System.getDeviceSettings / System.getSystemStats
+        var devSettings = System.getDeviceSettings();
+        if (devSettings != null) {
+            if (devSettings has :partNumber && devSettings.partNumber != null) {
+                deviceInfo.put("part_number", devSettings.partNumber);
+            }
+            if (devSettings has :firmwareVersion && devSettings.firmwareVersion != null) {
+                deviceInfo.put("firmware", devSettings.firmwareVersion.toString());
+            }
+            if (devSettings has :monkeyVersion && devSettings.monkeyVersion != null) {
+                deviceInfo.put("monkey_version", devSettings.monkeyVersion.toString());
+            }
+        }
+        deviceInfo.put("app_version", "1.2.0");
+
+        var histories = {
+            "hr"       => sm.getHrHistory(MAX_HIST),
+            "hrv"      => sm.getHrvHistory(MAX_HIST),
+            "spo2"     => sm.getSpo2History(MAX_HIST),
+            "stress"   => sm.getStressHistory(MAX_HIST),
+            "pressure" => sm.getPressureHistory(MAX_HIST),
+            "temp"     => sm.getTemperatureHistory(MAX_HIST),
+            "elev"     => sm.getElevationHistory(MAX_HIST)
+        } as Dictionary;
+
+        var header = PacketSerializer.serializeHeaderPacket(
+            _sessionId, System.getTimer(),
+            userProfile, deviceInfo, histories
+        );
+
+        if (header != null) {
+            (_commManager as CommunicationManager).sendPacket(header);
+            System.println("SessionManager: header packet queued ("
+                + header.length() + " chars)");
+        }
     }
 
     //! Stop the current capture session gracefully.
@@ -212,13 +269,42 @@ class SessionManager {
         // Get battery level
         var battery = System.getSystemStats().battery.toNumber();
 
-        // Get latest SpO2 snapshot (null if no measurement ever recorded)
-        var spo2Value = null;
-        var spo2AgeS  = null;
+        // ── Build comprehensive meta dict ──────────────────────────
+        var meta = { "bat" => battery } as Dictionary;
+
         if (_sensorManager != null) {
-            var snap = (_sensorManager as SensorManager).getSpo2Snapshot();
-            spo2Value = snap.get("value");
-            spo2AgeS  = snap.get("ageS");
+            var sm = _sensorManager as SensorManager;
+
+            // SpO2 (via SensorHistory)
+            var snap = sm.getSpo2Snapshot();
+            if (snap.get("value") != null) {
+                meta.put("spo2", snap.get("value"));
+                if (snap.get("ageS") != null) {
+                    meta.put("spo2_age_s", snap.get("ageS"));
+                }
+            }
+
+            // Live Sensor.Info polls (pressure, altitude, temp, cadence, power, heading)
+            var live = sm.getLiveSensorInfo();
+            var liveKeys = live.keys() as Array;
+            for (var i = 0; i < liveKeys.size(); i++) {
+                var k = liveKeys[i] as String;
+                meta.put(k, live.get(k));
+            }
+
+            // ActivityMonitor polls (resp, stress, body_batt, steps, dist, floors)
+            var ami = sm.getActivityMonitorInfo();
+            var amKeys = ami.keys() as Array;
+            for (var j = 0; j < amKeys.size(); j++) {
+                var k2 = amKeys[j] as String;
+                meta.put(k2, ami.get(k2));
+            }
+        }
+
+        // RR intervals from the most recent sensor batch (HRV source)
+        var rrIntervals = null;
+        if (_sensorManager != null) {
+            rrIntervals = (_sensorManager as SensorManager).getLastRrIntervals();
         }
 
         // Serialize packet
@@ -232,10 +318,9 @@ class SessionManager {
             _packetIndex,
             System.getTimer(),
             samples,
+            rrIntervals,
             gpsData,
-            battery,
-            spo2Value,
-            spo2AgeS,
+            meta,
             errorFlags
         );
 

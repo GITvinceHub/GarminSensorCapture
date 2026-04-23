@@ -2,6 +2,8 @@ import Toybox.Sensor;
 import Toybox.Lang;
 import Toybox.System;
 import Toybox.Time;
+import Toybox.ActivityMonitor;
+import Toybox.UserProfile;
 
 //! Manages IMU sensor registration and data collection.
 //! Reads: accelerometer (x,y,z), gyroscope (x,y,z), magnetometer (x,y,z), HR.
@@ -51,6 +53,9 @@ class SensorManager {
     //! Whether the sensor is currently registered
     private var _isRegistered as Boolean;
 
+    //! Last RR intervals captured from the batched HeartRateData
+    private var _lastRrIntervals as Array<Number> or Null;
+
     //! @param callback Function called with each new sample
     function initialize(callback as SampleCallback) {
         _callback         = callback;
@@ -60,6 +65,7 @@ class SensorManager {
         _freqWindowStart  = System.getTimer();
         _measuredFrequency = PRIMARY_RATE_HZ.toFloat();
         _isRegistered     = false;
+        _lastRrIntervals   = null;
     }
 
     //! Register sensor listeners. Called when session starts.
@@ -114,6 +120,19 @@ class SensorManager {
         var accel = (data has :accelerometerData) ? data.accelerometerData : null;
         var gyro  = (data has :gyroscopeData) ? data.gyroscopeData : null;
         var mag   = (data has :magnetometerData) ? data.magnetometerData : null;
+
+        // ── Save RR intervals for this batch (for HRV analysis) ───
+        // HeartRateData.heartBeatIntervals is an Array<Number> of RR in ms.
+        if (data has :heartRateData && data.heartRateData != null) {
+            var hrd = data.heartRateData;
+            if (hrd has :heartBeatIntervals && hrd.heartBeatIntervals != null) {
+                _lastRrIntervals = hrd.heartBeatIntervals;
+            } else {
+                _lastRrIntervals = null;
+            }
+        } else {
+            _lastRrIntervals = null;
+        }
 
         // Point-in-time HR (bpm) snapshot — applied to all samples in this batch
         var hrNow = 0;
@@ -228,6 +247,199 @@ class SensorManager {
     //! Check if the sensor is currently registered.
     function isRegistered() as Boolean {
         return _isRegistered;
+    }
+
+    //! Return RR intervals (ms) captured from the most recent sensor batch.
+    //! Typically 1-3 values per 1-second batch. Null if HR data was unavailable.
+    function getLastRrIntervals() as Array<Number> or Null {
+        return _lastRrIntervals;
+    }
+
+    //! Poll real-time Sensor.Info values (pressure, altitude, temperature,
+    //! cadence, power, heading). Returns a Dictionary with only the fields
+    //! that are available at call time.
+    function getLiveSensorInfo() as Dictionary {
+        var info = Sensor.getInfo();
+        var out = {} as Dictionary;
+        if (info == null) { return out; }
+
+        if (info has :pressure && info.pressure != null) {
+            out.put("pres_pa", info.pressure.toNumber());
+        }
+        if (info has :altitude && info.altitude != null) {
+            out.put("alt_baro_m", info.altitude.toFloat());
+        }
+        if (info has :temperature && info.temperature != null) {
+            out.put("temp_c", info.temperature.toFloat());
+        }
+        if (info has :cadence && info.cadence != null) {
+            out.put("cadence", info.cadence.toNumber());
+        }
+        if (info has :power && info.power != null) {
+            out.put("power_w", info.power.toNumber());
+        }
+        if (info has :heading && info.heading != null) {
+            out.put("heading_rad", info.heading.toFloat());
+        }
+        return out;
+    }
+
+    //! Poll ActivityMonitor fields that update slowly (minutes).
+    //! Each (value, age) is returned when available.
+    function getActivityMonitorInfo() as Dictionary {
+        var ai = ActivityMonitor.getInfo();
+        var out = {} as Dictionary;
+        if (ai == null) { return out; }
+
+        if (ai has :respirationRate && ai.respirationRate != null) {
+            out.put("resp", ai.respirationRate.toNumber());
+        }
+        if (ai has :stressScore && ai.stressScore != null) {
+            out.put("stress", ai.stressScore.toNumber());
+        }
+        if (ai has :bodyBatteryLevel && ai.bodyBatteryLevel != null) {
+            out.put("body_batt", ai.bodyBatteryLevel.toNumber());
+        }
+        if (ai has :steps && ai.steps != null) {
+            out.put("steps_day", ai.steps.toNumber());
+        }
+        if (ai has :distance && ai.distance != null) {
+            // ActivityMonitor.Info.distance is in cm → convert to m
+            out.put("dist_day_m", (ai.distance.toNumber() / 100).toNumber());
+        }
+        if (ai has :floorsClimbed && ai.floorsClimbed != null) {
+            out.put("floors_day", ai.floorsClimbed.toNumber());
+        }
+        return out;
+    }
+
+    //! Fetch the user profile (static data set in watch settings).
+    //! Useful for normalising HR/power/distance metrics.
+    function getUserProfile() as Dictionary {
+        var out = {} as Dictionary;
+        try {
+            var prof = UserProfile.getProfile();
+            if (prof == null) { return out; }
+            if (prof has :weight && prof.weight != null) {
+                out.put("weight_g", prof.weight.toNumber());
+            }
+            if (prof has :height && prof.height != null) {
+                out.put("height_cm", prof.height.toNumber());
+            }
+            if (prof has :birthYear && prof.birthYear != null) {
+                out.put("birth_year", prof.birthYear.toNumber());
+            }
+            if (prof has :gender && prof.gender != null) {
+                out.put("gender",
+                    prof.gender == UserProfile.GENDER_FEMALE ? "F" : "M");
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SensorManager: UserProfile read failed: " + ex.getErrorMessage());
+        }
+        return out;
+    }
+
+    //! Generic history reader — returns an Array of [ts_unix_s, value] pairs,
+    //! newest first, capped at maxN entries.
+    //! @param iter  A SensorHistoryIterator (may be null if permission/support missing)
+    //! @param maxN  Max entries to return
+    private function _readHistory(iter, maxN as Number) as Array {
+        var out = [] as Array;
+        if (iter == null) { return out; }
+        try {
+            var count = 0;
+            while (count < maxN) {
+                var s = iter.next();
+                if (s == null) { break; }
+                if (s.data == null) { count++; continue; }
+                var tsS = 0;
+                if (s has :when && s.when != null) {
+                    tsS = s.when.value();
+                }
+                out.add([tsS, s.data]);
+                count++;
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SensorManager: history read failed: " + ex.getErrorMessage());
+        }
+        return out;
+    }
+
+    //! Get last N HR samples (bpm).
+    function getHrHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getHeartRateHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getHeartRateHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N HRV samples (typically ms RMSSD).
+    function getHrvHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getHeartRateVariabilityHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getHeartRateVariabilityHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N SpO2 samples (%).
+    function getSpo2History(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getOxygenSaturationHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getOxygenSaturationHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N stress samples (0-100).
+    function getStressHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getStressHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getStressHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N pressure samples (Pa).
+    function getPressureHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getPressureHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getPressureHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N temperature samples (°C).
+    function getTemperatureHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getTemperatureHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getTemperatureHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
+    }
+
+    //! Get last N barometric elevation samples (m).
+    function getElevationHistory(maxN as Number) as Array {
+        if (!(Toybox has :SensorHistory)) { return []; }
+        if (!(Toybox.SensorHistory has :getElevationHistory)) { return []; }
+        var iter = Toybox.SensorHistory.getElevationHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        return _readHistory(iter, maxN);
     }
 
     //! Get the latest SpO2 (Pulse Ox) measurement along with its age in seconds.
