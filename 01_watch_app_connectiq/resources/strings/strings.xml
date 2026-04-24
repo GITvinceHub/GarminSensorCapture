@@ -24,6 +24,11 @@
   <string id="menu_system_info">System info</string>
   <string id="menu_close">Close</string>
   <string id="hint_press_start">PRESS START</string>
+  <string id="hint_press_stop">PRESS STOP</string>
+  <string id="link_up">BLE OK</string>
+  <string id="link_down">BLE X</string>
+  <string id="gps_fix_short">GPS FIX</string>
+  <string id="gps_nofix_short">GPS --</string>
   <string id="hint_down_detail">DOWN: sub-page</string>
   <string id="hint_up_screens">UP: next screen</string>
   <string id="hint_lock_active">BUTTONS LOCKED</string>

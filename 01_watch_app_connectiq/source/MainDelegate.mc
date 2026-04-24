@@ -31,7 +31,12 @@ class MainDelegate extends WatchUi.BehaviorDelegate {
         return true;
     }
 
-    //! BACK — let the CIQ runtime handle exit (returns false ⇒ default behaviour).
+    //! BACK — GIQ-061: "Back is one of the most common behaviors on Garmin
+    //! devices. Avoid modifying this behavior" (Designing_Workflows Best
+    //! Practices). We STOP the session if recording, then let the CIQ runtime
+    //! pop the view (return false => system handles — will close app since we
+    //! are at base view). This gives the user a single, consistent way out.
+    //! GIQ-062: `return false` => event NOT consumed => system default wins.
     function onBack() {
         try {
             if (_session != null && _session.getState() != SessionManager.STATE_IDLE) {
@@ -40,7 +45,7 @@ class MainDelegate extends WatchUi.BehaviorDelegate {
         } catch (ex instanceof Lang.Exception) {
             System.println("MainDelegate: onBack FATAL " + ex.getErrorMessage());
         }
-        return false;   // let system close the app
+        return false;
     }
 
     //! Generic key handler — try to catch any KEY_ENTER / KEY_START events not

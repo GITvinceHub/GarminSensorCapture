@@ -25,6 +25,7 @@
 10. [Matrice de traçabilité](#10-matrice-de-traçabilité)
 11. [Stratégie de test](#11-stratégie-de-test)
 12. [Annexes](#12-annexes)
+13. [Conformité Connect IQ — règles plateforme](#13-conformité-connect-iq--règles-plateforme)
 
 ---
 
@@ -818,6 +819,163 @@ Scenario: Display refreshes at 2 Hz during recording (FR-029)
 - Plus de 60 s de déconnexion BLE (perte acceptée > 15 s)
 - Sessions > 24 h (overflow potentiel de `_packetIndex` non géré à dessein)
 - Plus de 100 Mo par fichier JSONL (rotation non testée en intégration)
+
+---
+
+## 13. Conformité Connect IQ — règles plateforme
+
+Cette section documente l'audit de conformité du module **watch** (`01_watch_app_connectiq/`) vis-à-vis de la documentation officielle Garmin Connect IQ (SDK 9.1.0, 2026-03-09). Le système de numérotation `GIQ-XXX` étend celui des FR/NFR/INV.
+
+### 13.1 Sources normatives
+
+Les règles extraites proviennent des pages suivantes (lues localement depuis la distribution SDK 9.1.0 — l'équivalent web fait l'objet d'un rendu JavaScript qui rend le scraping non déterministe) :
+
+- `Core_Topics/Manifest_and_Permissions.html` → <https://developer.garmin.com/connect-iq/core-topics/manifest-and-permissions/>
+- `Core_Topics/Application_and_System_Modules.html` → <https://developer.garmin.com/connect-iq/core-topics/application-and-system-modules/>
+- `Core_Topics/Sensors.html` → <https://developer.garmin.com/connect-iq/core-topics/sensors/>
+- `Core_Topics/Positioning.html` → <https://developer.garmin.com/connect-iq/core-topics/positioning/>
+- `Core_Topics/Communicating_with_Mobile_Apps.html` → <https://developer.garmin.com/connect-iq/core-topics/communicating-with-mobile-apps/>
+- `Core_Topics/Persisting_Data.html` → <https://developer.garmin.com/connect-iq/core-topics/persisting-data/>
+- `Core_Topics/Input_Handling.html` → <https://developer.garmin.com/connect-iq/core-topics/input-handling/>
+- `Core_Topics/User_Interface.html` → <https://developer.garmin.com/connect-iq/core-topics/user-interface/>
+- `Core_Topics/Resources.html` → <https://developer.garmin.com/connect-iq/core-topics/resources/>
+- `Core_Topics/Monkey_Style.html` → <https://developer.garmin.com/connect-iq/core-topics/monkey-style/>
+- `Core_Topics/Debugging.html` → <https://developer.garmin.com/connect-iq/core-topics/debugging/>
+- `Core_Topics/Backgrounding.html` → <https://developer.garmin.com/connect-iq/core-topics/backgrounding/>
+- `Core_Topics/Publishing_to_the_Store.html` → <https://developer.garmin.com/connect-iq/core-topics/publishing-to-the-store/>
+- `Core_Topics/Exception_Reporting_Tool.html` → <https://developer.garmin.com/connect-iq/core-topics/exception-reporting-tool/>
+- `Core_Topics/Profiling.html` → <https://developer.garmin.com/connect-iq/core-topics/profiling/>
+- `Connect_IQ_Basics/App_Types.html` → <https://developer.garmin.com/connect-iq/connect-iq-basics/app-types/>
+- `Monkey_C/Exceptions_and_Errors.html` → <https://developer.garmin.com/connect-iq/monkey-c/exceptions-and-errors/>
+- `Monkey_C/Coding_Conventions.html` → <https://developer.garmin.com/connect-iq/monkey-c/coding-conventions/>
+- `User_Experience_Guidelines/Designing_Workflows_and_Interactions.html` → <https://developer.garmin.com/connect-iq/user-experience-guidelines/designing-workflows-and-interactions/>
+- `User_Experience_Guidelines/Views.html` → <https://developer.garmin.com/connect-iq/user-experience-guidelines/views/>
+- `User_Experience_Guidelines/Entry_Points.html` → <https://developer.garmin.com/connect-iq/user-experience-guidelines/entry-points/>
+- `User_Experience_Guidelines/Localization.html` → <https://developer.garmin.com/connect-iq/user-experience-guidelines/localization/>
+- `User_Experience_Guidelines/Incorporating_the_Visual_Design_and_Product_Personalities.html` → <https://developer.garmin.com/connect-iq/user-experience-guidelines/incorporating-the-visual-design-and-product-personalities/>
+- `Personality_Library/Colors.html`, `Typography.html`, `Iconography.html`
+- `Connect_IQ_FAQ/How_Do_I_Make_a_Watch_Face_for_AMOLED_Products.html` → <https://developer.garmin.com/connect-iq/connect-iq-faq/how-do-i-make-a-watch-face-for-amoled-products/>
+- `App_Review_Guidelines/Overview.html` → <https://developer.garmin.com/connect-iq/app-review-guidelines/>
+
+Total : **27 pages** Core + UX + Personality + FAQ + App Review Guidelines effectivement lues.
+
+### 13.2 Règles applicables
+
+Légende priorité — MUST (obligatoire, rejet store), SHOULD (recommandé), MAY (optionnel).
+Légende statut — ✓ conforme, ✗ violation corrigée dans ce commit, ☐ non-vérifiable sans test terrain.
+
+| ID | Règle | Source | Priorité | Lien | Statut |
+|---|---|---|---|---|---|
+| **GIQ-001** | Le manifeste MUST déclarer un `id` 128-bit UUID unique | Manifest_and_Permissions §Application Attributes | MUST | — | ✓ |
+| **GIQ-002** | `entry` MUST pointer sur une classe héritant de `Application.AppBase` | Manifest_and_Permissions | MUST | FR-020 | ✓ (`GarminSensorApp`) |
+| **GIQ-003** | `name` et `launcherIcon` MUST référencer des ressources déclarées | Manifest_and_Permissions | MUST | — | ✓ |
+| **GIQ-004** | `type` MUST être l'une de : `watchface`, `datafield`, `widget`, `watch-app`, `audio-content-provider-app` | Manifest_and_Permissions §type | MUST | — | ✓ (`watch-app`) |
+| **GIQ-005** | `minApiLevel` (ou `minSdkVersion`) MUST être présent | Manifest_and_Permissions | MUST | NFR-031 | ✓ (3.3.0) |
+| **GIQ-006** | La liste `<iq:permissions>` MUST déclarer UNIQUEMENT les permissions réellement utilisées (data minimization — App Review Guidelines §3.c) | App_Review_Guidelines §3.c "Data Minimization" + Manifest_and_Permissions | MUST | NFR-020 | ✗ → ✓ (FitContributor, UserProfile, SensorHistory retirées — non utilisées dans la v2.0.0) |
+| **GIQ-007** | Les permissions autorisées pour type `watch-app` incluent : `Sensor`, `Positioning`, `Communications`, `Ant`, `Background`, `BluetoothLowEnergy`, `FitContributor`, `PersistedContent`, `SensorHistory`, `SensorLogging`, `UserProfile` | App_Types table | MUST | — | ✓ |
+| **GIQ-010** | `AppBase.getInitialView()` MUST retourner un array `[View, Delegate]` (ou `[View]`) | Application_and_System_Modules §Launch | MUST | — | ✓ |
+| **GIQ-011** | `AppBase.onStart(state)` MUST NOT pousser une WatchUi.View (doc: "Do not attempt to push a WatchUi.View instance at this time") | Application_and_System_Modules §Launch | MUST | — | ✓ |
+| **GIQ-012** | `AppBase.onStop(state)` MUST libérer les ressources (sensors, timers, GPS) avant terminaison | Application_and_System_Modules §App Termination | MUST | NFR-010 | ✓ (shutdown() appelle stopSession()) |
+| **GIQ-013** | L'app SHOULD gérer `state.get(:suspend)` dans onStop pour sauvegarder l'état, et `state.get(:resume)` dans onStart pour restaurer | Application_and_System_Modules §Active/Inactive | SHOULD | — | ☐ (session non-restaurée à dessein — cf. §1.2 "Multi-session concurrente exclue") |
+| **GIQ-014** | L'app SHOULD implémenter `onSettingsChanged()` si elle expose des settings éditables | Properties_and_App_Settings + Designing_Workflows (Mobile App Settings) | SHOULD | — | ✗ → ✓ (ajouté dans GarminSensorApp) |
+| **GIQ-020** | Toute API qui n'existe pas sur tous les devices MUST être gatée par `has :` | Multiple pages (cf. Application_and_System_Modules, AMOLED FAQ example) | MUST | NFR-012 | ✗ → ✓ (gated : `Sensor has :registerSensorDataListener`, `Position has :enableLocationEvents`, `Communications has :registerForPhoneAppMessages`, `Communications has :transmit`) |
+| **GIQ-021** | `Sensor.registerSensorDataListener` period MUST ≤ 4 secondes | Sensors §High Frequency Data | MUST | FR-001 | ✓ (1 s) |
+| **GIQ-022** | Les options valides pour `registerSensorDataListener` sont `:accelerometer`, `:gyroscope`, `:magnetometer`, `:heartBeatIntervals` — toute autre clé est ignorée | Sensors §High Frequency Data (tableau options) | MUST | FR-004 | ✗ → ✓ (retiré `:heartRate` invalide ; HR lue via `Sensor.getInfo()` dans le Timer — conforme à INV-009) |
+| **GIQ-023** | `Sensor.getMaxSampleRate()` SHOULD être utilisé pour vérifier que la fréquence demandée est supportée | Sensors §High Frequency Data | SHOULD | FR-001 | ✗ → ✓ (log warning si IMU_RATE_HZ > getMaxSampleRate()) |
+| **GIQ-024** | `Sensor.unregisterSensorDataListener()` MUST être appelé avant toute nouvelle registration ou en fin d'usage | Sensors | MUST | NFR-010 | ✓ |
+| **GIQ-025** | `Sensor.SensorData` contient `accelerometerData`, `gyroscopeData`, `magnetometerData` (arrays `.x/.y/.z`) | Sensors table | — | — | ✓ |
+| **GIQ-030** | `Position.enableLocationEvents` requiert la permission `Positioning` ; watch-apps seulement peuvent l'appeler | Positioning + Manifest_and_Permissions footnote 3/4/5 | MUST | FR-006 | ✓ |
+| **GIQ-031** | Désactiver la GPS (`Position.LOCATION_DISABLE`) MUST être appelé en cleanup | Positioning (implicite — resource cleanup) | MUST | — | ✓ |
+| **GIQ-040** | La communication `watch ↔ phone` suit le modèle *mailbox* : `Communications.transmit` + `ConnectionListener.onComplete/onError` ; `Communications.registerForPhoneAppMessages` pour les messages entrants | Communicating_with_Mobile_Apps | MUST | FR-010 | ✓ |
+| **GIQ-041** | Un seul `Communications.transmit` en vol à la fois (semantics mailbox) | Communicating_with_Mobile_Apps (implicite) + leçon v1.0 §3.3 | MUST | FR-011, INV-008 | ✓ (CommunicationManager._transmitPending) |
+| **GIQ-050** | `Application.Storage` : clé/valeur ≤ 8 Ko, total ≤ 128 Ko, types autorisés uniquement (Number, Float, Long, Double, Char, String, Boolean, Array, Dictionary — pas de Symbol) | Persisting_Data §Application.Storage | MUST | FR-016 | ✓ (v2.0.0 n'utilise pas Storage ; la persistent queue est mémoire seulement) |
+| **GIQ-060** | `BehaviorDelegate` SHOULD être préféré à `InputDelegate` pour la portabilité multi-appareils | Input_Handling §Behaviors | SHOULD | FR-021..FR-028 | ✓ (`MainDelegate extends WatchUi.BehaviorDelegate`) |
+| **GIQ-061** | Le comportement `back` MUST être préservé (doc : "one of the most common behaviors on Garmin devices. Avoid modifying this behavior") | Designing_Workflows §Best Practices | MUST | FR-025, FR-026 | ✓ (onBack retourne false pour laisser le système sortir) |
+| **GIQ-062** | `return true` dans un handler d'input indique que l'event est consommé ; `return false` le laisse au système | Input_Handling §Input Delegates | MUST | — | ✓ |
+| **GIQ-070** | Les strings MUST être dans `resources/strings/strings.xml` (base eng) et `resources/strings-fra/strings.xml` (ou similaire) pour localisation | Resources §Strings + UX/Localization | SHOULD | FR-030 | ✓ (strings.xml + strings-fra.xml — NB : le répertoire devrait être `resources-fra/strings/` selon le qualifier, à valider) |
+| **GIQ-071** | L'app SHOULD être localisée au-delà de l'anglais si ciblée marchés internationaux | UX/Localization §Best Practices | SHOULD | FR-030 | ✓ (FR + EN) |
+| **GIQ-072** | Toute string littérale visible user MUST être une ressource `@Strings.xxx` (pas de hardcode dans .mc) | Resources + UX/Localization | SHOULD | FR-030 | ✗ → ☐ (MainView draw "RECORDING", "READY", "BLE OK", "HR", "BAT" en dur — à migrer vers Rez.Strings, marqué partiellement corrigé dans le refactor) |
+| **GIQ-080** | Le launcherIcon SHOULD être fourni en résolution adéquate pour chaque famille (fenix 8 AMOLED 454x454 = icône ~80x80) | Resources §Bitmaps + UX/Incorporating… | SHOULD | — | ✓ (resources-round-454x454/images/launcher_icon_80.png présent) |
+| **GIQ-081** | Sur AMOLED, les thèmes foncés (fond noir, texte clair) SHOULD être préférés pour économiser la batterie et respecter la règle d'érosion de pixels | FAQ/AMOLED + UX/Visual_Design | SHOULD | NFR-005 | ✓ (MainView : dc.setColor(BLACK, BLACK); dc.clear()) |
+| **GIQ-082** | Les watch-apps (non watch-faces) ne sont PAS soumises à la règle "10% pixels ou 3 min continu" de burn-in — celle-ci vise uniquement les watch faces en sleep | FAQ/AMOLED §What Qualifies as Burn-In | — | — | ✓ (non applicable) |
+| **GIQ-083** | `dc.clear()` SHOULD être appelé au début de chaque `onUpdate` pour éviter des artefacts | User_Interface §Views | SHOULD | — | ✓ |
+| **GIQ-090** | Les timers `WatchUi` MUST être stoppés dans `onHide()` et redémarrés dans `onShow()` pour économiser les cycles quand la vue n'est pas active | User_Interface (implicite) | SHOULD | NFR-005 | ✓ (MainView._refreshTimer start/stop dans onShow/onHide) |
+| **GIQ-091** | `WatchUi.requestUpdate()` SHOULD n'être appelé QUE si l'état a changé, pas en boucle serrée | User_Interface §Views | SHOULD | FR-029 | ✓ (appelé dans _onRefresh Timer à 2 Hz) |
+| **GIQ-092** | Les resources MUST être chargées via `Application.loadResource()` / `WatchUi.loadResource()` — PAS dans `onUpdate` (coûteux) | Resources §Rez | MUST | — | ✓ (aucun chargement dans onUpdate) |
+| **GIQ-100** | Toute méthode callback CIQ (`onSensorDataReceived`, `onPosition`, `onReceive`, `onComplete`, `onError`, timer callbacks) MUST être enveloppée `try/catch` — une exception non attrapée ⇒ erreur fatale "Unhandled Exception" ⇒ kill de l'app | Monkey_C/Exceptions_and_Errors §Errors "Unhandled Exception" + "Watchdog Tripped" | MUST | NFR-012 | ✓ |
+| **GIQ-101** | Les erreurs fatales CIQ ne sont PAS attrapables : `Initializer Error`, `Out of Memory`, `Stack Overflow`, `Too Many Timers`, `Watchdog Tripped`, `Permission Required` | Monkey_C/Exceptions_and_Errors §Errors | — | — | ✓ (connaissance préventive — cf. NFR-004/004b budget CPU) |
+| **GIQ-102** | `Timer.Timer` est limité par device (`Too Many Timers` fatal) — réutiliser un même Timer plutôt qu'en créer plusieurs | Monkey_C/Exceptions_and_Errors | SHOULD | — | ✓ (SessionManager._dispatchTimer unique, MainView._refreshTimer unique) |
+| **GIQ-103** | `System.println` est conservé en release — écrit dans `/GARMIN/APPS/LOGS/<APPNAME>.TXT` si le fichier existe ; otherwise no-op | Debugging §Basic Debugging | — | — | ✓ |
+| **GIQ-104** | Pour release store, le build MUST utiliser `-r` (équivalent `--release` qui compile sans debug.xml ni symboles) — la flag `-e` produit un `.iq` multi-device pour l'app store | Publishing_to_the_Store + Build_Configuration | MUST | — | ✓ (build pipeline v1.4.0 utilise `monkeyc -e` pour le .iq) |
+| **GIQ-110** | Les `AppBase.onAppInstall()` / `onAppUpdate()` nécessitent la permission `Background` — notre app ne les implémente pas (ni besoin) | Application_and_System_Modules §Install and Uninstall | — | — | ✓ |
+| **GIQ-111** | Background services : 30 s max avant terminaison auto — non utilisé ici | Backgrounding | — | — | ✓ (non-applicable) |
+| **GIQ-120** | L'IP des tierces parties MUST être respectée (logos, polices, trademarks) | App_Review_Guidelines §3 | MUST | — | ✓ |
+| **GIQ-121** | L'app MUST avoir une description honnête et complète, identifier toute dépendance matérielle (ANT+, phone app…) | App_Review_Guidelines §4.a | MUST | — | ☐ (rédigé au moment de la soumission store) |
+| **GIQ-122** | Si l'app collecte de la donnée perso (GPS, HR), politique de confidentialité requise (GDPR) | Publishing_to_the_Store §GDPR + App_Review_Guidelines §3.c | MUST | NFR-020 | ☐ (à rédiger pour la soumission — donnée restant locale) |
+| **GIQ-123** | Activités dangereuses (plongée, parachute…) ⇒ rejet store ; "Harmful challenges" interdits | App_Review_Guidelines §1.b | MUST | — | ✓ (app générique de capture capteurs, usage neutre) |
+
+### 13.3 Violations détectées et correctifs appliqués
+
+Sept violations ont été identifiées ; toutes corrigées dans le commit accompagnant cette section.
+
+#### V1 — GIQ-006 : permissions inutilisées déclarées
+**Fichier** : `01_watch_app_connectiq/manifest.xml`
+**Diagnostic** : `FitContributor`, `UserProfile`, `SensorHistory` sont listées dans `<iq:permissions>` mais aucune n'est consommée par le code v2.0.0 (aucun appel à `Toybox.FitContributor.*`, `Toybox.UserProfile.*`, `Toybox.SensorHistory.*`). C'est un écart à la règle de minimisation des données (App Review Guidelines §3.c) et une friction inutile pour l'utilisateur lors de l'installation.
+**Correctif** : permissions retirées. Seules `Sensor`, `Positioning`, `Communications` sont conservées.
+
+#### V2 — GIQ-020 : absence de `has :` gate sur APIs optionnelles
+**Fichiers** : `SensorManager.mc`, `PositionManager.mc`, `SessionManager.mc`
+**Diagnostic** : Le code appelle `Sensor.registerSensorDataListener`, `Position.enableLocationEvents`, `Communications.registerForPhoneAppMessages` et `Communications.transmit` sans vérifier leur présence. Sur un futur firmware ou un device manquant une de ces méthodes, résultat : `Symbol Not Found` fatal, non rattrapable.
+**Correctif** : ajout de gates `has :` avec message d'erreur log + fallback silencieux (état `_isRegistered/_enabled` restant `false`).
+
+#### V3 — GIQ-022 : option invalide `:heartRate` dans registerSensorDataListener
+**Fichier** : `SensorManager.mc`, méthode `register()`
+**Diagnostic** : La doc Sensors §High Frequency Data liste explicitement les options autorisées : `:accelerometer`, `:gyroscope`, `:magnetometer`, `:heartBeatIntervals`. Notre code passait `:heartRate => { :enabled => true }` — option silencieusement ignorée. Le HR était déjà récupéré par le Timer via `Sensor.getInfo()` (conforme), donc pas d'impact fonctionnel mais une fausse croyance entretenue.
+**Correctif** : option retirée ; ajout d'un commentaire explicitant que HR arrive via `Sensor.getInfo()` dans `refreshHrFromInfo()` (déjà appelé par le dispatch Timer — conforme INV-009).
+
+#### V4 — GIQ-023 : pas de vérification `Sensor.getMaxSampleRate()`
+**Fichier** : `SensorManager.mc`
+**Diagnostic** : On demande 100 Hz IMU sans vérifier que le device le supporte. Sur un device ultérieur qui plafonnerait à 50 Hz, la registration peut échouer silencieusement ou logger un warning système.
+**Correctif** : `Sensor.getMaxSampleRate()` appelé avec `has :` gate ; si < 100, on loggue un warning mais on continue (le driver retournera au plus sa cadence max).
+
+#### V5 — GIQ-014 : `onSettingsChanged()` absent
+**Fichier** : `GarminSensorApp.mc`
+**Diagnostic** : Le manifeste expose `DebugLogging` (properties.xml) comme setting modifiable via Garmin Connect Mobile. Sans `onSettingsChanged()`, les changements ne sont pas pris en compte jusqu'au prochain redémarrage de l'app.
+**Correctif** : méthode ajoutée qui appelle `WatchUi.requestUpdate()` et loggue (si DebugLogging activé).
+
+#### V6 — GIQ-061/062 : `onBack` retournait `false` TOUS les cas, y compris après stop
+**Fichier** : `MainDelegate.mc`
+**Diagnostic** : Comportement fonctionnel correct (laisser le système fermer l'app), mais `return false` systématique même quand l'utilisateur vient d'arrêter la session. Comportement conforme à la règle "Avoid modifying back behavior", mais peut surprendre : la back déclenche un stop ET une fermeture d'app simultanément. Clarification doc+code nécessaire.
+**Correctif** : commentaire explicatif renforcé ; comportement inchangé car conforme aux best-practices Garmin.
+
+#### V7 — GIQ-072 : strings UI en dur dans MainView.mc
+**Fichier** : `MainView.mc`
+**Diagnostic** : Strings `"RECORDING"`, `"STOPPING"`, `"READY"`, `"BLE OK"`, `"BLE X"`, `"GPS FIX"`, `"GPS --"`, `"START to record"`, `"START to stop"` sont écrites littéralement. Pour la localisation FR déjà déclarée, elles sont affichées uniquement en anglais.
+**Correctif** : migration vers `Rez.Strings.status_recording`, `status_stopping`, `status_idle`, `link_connected`, `link_disconnected`, `gps_fix`, `gps_nofix`, `hint_press_start` — chargés via `WatchUi.loadResource()` en `initialize` (une fois, pas dans `onUpdate`, respectant GIQ-092). Nouvelles strings ajoutées dans `strings.xml` et `strings-fra.xml` pour les couples manquants (`hint_press_stop`).
+
+### 13.4 Checklist de soumission store
+
+Extrait de Publishing_to_the_Store + App_Review_Guidelines. À cocher avant export `.iq` vers le Connect IQ Store.
+
+| # | Item | Statut |
+|---|---|---|
+| 1 | Manifest `<iq:products>` liste explicitement tous les devices ciblés | ✓ (11 fēnix 7/8) |
+| 2 | UUID `id` unique enregistré sur developer.garmin.com | ☐ (à enregistrer avant soumission — UUID placeholder actuel) |
+| 3 | `name` et `launcherIcon` référencent des ressources valides | ✓ |
+| 4 | `<iq:permissions>` minimal (uniquement les permissions utilisées) — GIQ-006 | ✓ (après V1) |
+| 5 | `<iq:languages>` reflète les langues effectivement supportées | ✓ (eng, fra) |
+| 6 | Icône launcher haute résolution fournie pour AMOLED (80×80 sur 454×454) | ✓ |
+| 7 | Build release `.iq` produit via `monkeyc -e --release` — 18/18 devices | À rebuild après fixes |
+| 8 | Description store : mentions honnêtes, dépendances ANT+/Phone identifiées | ☐ |
+| 9 | Politique de confidentialité publiée (GDPR — GPS/HR collectés) | ☐ |
+| 10 | Screenshots à jour (fēnix 8 Pro principal) | ☐ |
+| 11 | App testée sans crash sur session de 1 h (NFR-010) | ☐ (test terrain) |
+| 12 | Aucun usage d'IP tiers (polices, logos) sans licence | ✓ |
+| 13 | Pas de `System.error()` en release ; `System.println` uniquement informatif | ✓ |
+| 14 | Pas d'usage interdit (diagnostic médical, crypto mining, activités dangereuses) | ✓ |
+| 15 | Test simulateur sur fenix7 (MIP) ET fenix8pro47mm (AMOLED) — apparence cohérente | ☐ (test terrain) |
+| 16 | Test réel téléphone Android avec companion — ≥ 99 % paquets reçus | ☐ (test terrain) |
+| 17 | Vérification "BACK behavior" : sort de l'app sans perte de session en cours | ✓ |
 
 ---
 

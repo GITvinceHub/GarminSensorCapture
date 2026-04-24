@@ -39,10 +39,22 @@ class GarminSensorApp extends Application.AppBase {
     }
 
     //! Return the initial view + delegate pair to the CIQ runtime.
+    //! GIQ-010: returns Array[View, Delegate] as required by AppBase.
     function getInitialView() {
         var view = new MainView(sessionManager);
         var delegate = new MainDelegate(sessionManager, view);
         return [view, delegate];
+    }
+
+    //! GIQ-014: app settings (properties.xml) can be edited via Garmin Connect
+    //! Mobile. When the user changes one, CIQ invokes this callback — we trigger
+    //! a redraw so any setting-dependent display updates immediately.
+    function onSettingsChanged() {
+        try {
+            WatchUi.requestUpdate();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onSettingsChanged err " + ex.getErrorMessage());
+        }
     }
 
     //! Global accessor used by other modules to reach the app instance.

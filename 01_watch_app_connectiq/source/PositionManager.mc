@@ -20,8 +20,15 @@ class PositionManager {
         _errorCount = 0;
     }
 
+    //! GIQ-020: gated `has :` check on the optional API.
     function enable() {
         if (_enabled) { return; }
+        if (!(Toybox.Position has :enableLocationEvents)) {
+            System.println("PositionManager: Position.enableLocationEvents not available");
+            _enabled = false;
+            _errorCount += 1;
+            return;
+        }
         try {
             Position.enableLocationEvents(
                 Position.LOCATION_CONTINUOUS,
@@ -36,10 +43,13 @@ class PositionManager {
         }
     }
 
+    //! GIQ-031: mandatory cleanup — disables GPS to reclaim battery.
     function disable() {
         if (!_enabled) { return; }
         try {
-            Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
+            if (Toybox.Position has :enableLocationEvents) {
+                Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
+            }
         } catch (ex instanceof Lang.Exception) {
             System.println("PositionManager: disable err " + ex.getErrorMessage());
         }

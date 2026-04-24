@@ -35,23 +35,52 @@ class SensorManager {
 
     //! Register with the Sensor framework. Idempotent.
     //! Returns true on success.
+    //!
+    //! GIQ-020: all optional APIs are gated via `has :` — if the device/firmware
+    //!          doesn't expose them, we fall back silently (fatal "Symbol Not
+    //!          Found" avoided).
+    //! GIQ-022: options dict includes ONLY valid keys per Sensors doc —
+    //!          :accelerometer, :gyroscope, :magnetometer, :heartBeatIntervals.
+    //!          HR (bpm) is NOT an option of registerSensorDataListener; it is
+    //!          refreshed from Sensor.getInfo() by the dispatch Timer (see
+    //!          refreshHrFromInfo below — respects INV-009 outside callback).
+    //! GIQ-023: we log a warning if the requested rate exceeds getMaxSampleRate()
+    //!          but still attempt registration (driver will cap to its own max).
     function register() {
         if (_isRegistered) {
             return true;
         }
+        if (!(Toybox.Sensor has :registerSensorDataListener)) {
+            System.println("SensorManager: Sensor.registerSensorDataListener not available on this device");
+            _isRegistered = false;
+            _errorCount += 1;
+            return false;
+        }
         try {
-            // Sensor.setEnabledSensors enables additional non-default sensors. HR and mag
-            // are enabled via the options dict of registerSensorDataListener below; keeping
-            // this empty call here for future extension without breaking the build.
-            Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
+            // GIQ-023: check max sample rate when the API is available.
+            if (Sensor has :getMaxSampleRate) {
+                var maxRate = Sensor.getMaxSampleRate();
+                if (maxRate != null && maxRate < IMU_RATE_HZ) {
+                    System.println("SensorManager: WARN requested " + IMU_RATE_HZ
+                        + " Hz but device max is " + maxRate + " Hz");
+                }
+            }
+
+            // Enable HR in the standard sensor stream so Sensor.getInfo().heartRate
+            // becomes live (used by refreshHrFromInfo below — outside the hot callback).
+            if (Sensor has :setEnabledSensors) {
+                Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
+            }
+
             Sensor.registerSensorDataListener(
                 method(:onSensorDataReceived),
                 {
-                    :period => 1,                       // 1-second batches (~100 samples)
-                    :accelerometer => { :enabled => true,  :sampleRate => IMU_RATE_HZ },
-                    :gyroscope     => { :enabled => true,  :sampleRate => IMU_RATE_HZ },
-                    :magnetometer  => { :enabled => true,  :sampleRate => IMU_RATE_HZ },
-                    :heartRate     => { :enabled => true }
+                    :period => 1,                                                   // 1-second batches (~100 samples)
+                    :accelerometer => { :enabled => true, :sampleRate => IMU_RATE_HZ },
+                    :gyroscope     => { :enabled => true, :sampleRate => IMU_RATE_HZ },
+                    :magnetometer  => { :enabled => true, :sampleRate => IMU_RATE_HZ }
+                    // NB: no :heartRate key — not a valid option (GIQ-022). HR is
+                    // pulled via Sensor.getInfo() in refreshHrFromInfo() from the Timer.
                 }
             );
             _isRegistered = true;
@@ -70,8 +99,12 @@ class SensorManager {
             return;
         }
         try {
-            Sensor.unregisterSensorDataListener();
-            Sensor.setEnabledSensors([]);
+            if (Toybox.Sensor has :unregisterSensorDataListener) {
+                Sensor.unregisterSensorDataListener();
+            }
+            if (Sensor has :setEnabledSensors) {
+                Sensor.setEnabledSensors([]);
+            }
         } catch (ex instanceof Lang.Exception) {
             System.println("SensorManager: unregister err " + ex.getErrorMessage());
         }
@@ -143,6 +176,7 @@ class SensorManager {
 
     //! Safe-to-call-outside-callback helper used by SessionManager's dispatch Timer
     //! to refresh the HR bpm cache. Respects INV-009: never called from the sensor callback.
+    //! GIQ-020: Sensor.getInfo() is a core API present on every CIQ device, no gate needed.
     function refreshHrFromInfo() {
         try {
             var info = Sensor.getInfo();

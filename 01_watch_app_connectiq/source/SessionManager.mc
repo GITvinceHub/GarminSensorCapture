@@ -65,8 +65,13 @@ class SessionManager {
         _lastErrorMsg = "";
 
         // Listen for ACKs / commands from the phone.
+        // GIQ-020: gated `has :` — avoid Symbol Not Found on trimmed firmwares.
         try {
-            Communications.registerForPhoneAppMessages(method(:onPhoneAppMessage));
+            if (Toybox.Communications has :registerForPhoneAppMessages) {
+                Communications.registerForPhoneAppMessages(method(:onPhoneAppMessage));
+            } else {
+                System.println("SessionManager: Communications.registerForPhoneAppMessages not available");
+            }
         } catch (ex instanceof Lang.Exception) {
             System.println("SessionManager: registerForPhoneAppMessages FAILED " + ex.getErrorMessage());
         }

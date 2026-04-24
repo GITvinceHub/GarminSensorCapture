@@ -63,9 +63,15 @@ class CommunicationManager {
     //! Pull one packet off the head and transmit it. Called only when
     //! _transmitPending == false — which is true at init, after onComplete,
     //! and after onError.
+    //! GIQ-020: `Communications has :transmit` gate — defensive against
+    //!          future firmwares / trimmed builds.
     function _tryDrain() {
         if (_transmitPending) { return; }
         if (_queue.size() == 0) { return; }
+        if (!(Toybox.Communications has :transmit)) {
+            System.println("CommManager: Communications.transmit not available");
+            return;
+        }
 
         var packet = _queue[0];
         _queue = _queue.slice(1, null);
