@@ -115,6 +115,16 @@ UC-07  Exporter une session au format ZIP (partage via n'importe quelle app)
 UC-08  Analyser les données via le script Python
 ```
 
+### 3.3 Leçons retenues des itérations précédentes
+
+Deux itérations ont révélé des écueils architecturaux à NE PAS reproduire :
+
+| Itération | Problème observé | Cause racine | Leçon |
+|---|---|---|---|
+| **v1.0** | 93 % de packet loss côté Android | `CommunicationManager._drainQueue` boucle `Communications.transmit()` en rafale sans attendre `onComplete()` ; le CIQ runtime est **single-in-flight strict** et drop silencieusement tout nouveau `transmit` tant que le précédent n'est pas acquitté | **INV-008** (§7.8) : exactement 1 `transmit` en vol à tout moment |
+| **v2.0** | App montre tuée par le runtime après ~6 paquets, sans exception attrapable | Trop de travail synchrone dans `onBatchReady` appelé depuis le callback capteur : SpO2 history, ActivityMonitor, flash write, BLE transmit — dépassement du budget watchdog CIQ (~400 ms) ET pression mémoire | **NFR-004** renforcé : le callback capteur n'accumule QUE ; sérialisation + transmit se font dans un Timer séparé |
+| v2.0 | Header packet (~3 KB avec 7 historiques) émis synchronement au `startSession()` | Trop gros, occupe le seul in-flight slot au pire moment | **FR-008** optionnel, déclenché en différé après les 5 premiers data packets |
+
 ---
 
 ## 4. Exigences fonctionnelles (FR)
@@ -130,14 +140,15 @@ UC-08  Analyser les données via le script Python
 | **FR-005** | La montre MUST capturer les RR intervals (HRV source) fournis par le SDK si disponibles | SHOULD |
 | **FR-006** | La montre MUST capturer position GPS, vitesse, cap, altitude à ~1 Hz | MUST |
 | **FR-007** | La montre MUST capturer pression barométrique, température, SpO2, stress, body battery dans la meta | SHOULD |
-| **FR-008** | La montre MUST capturer l'historique des dernières 60 valeurs HR/HRV/SpO2/stress/pression/température/élévation dans le **header packet** | SHOULD |
+| **FR-008** | La montre MAY émettre un header packet enrichi (user profile + histoires 60 entrées), **différé d'au moins 5 secondes** après le début d'enregistrement pour ne pas saturer le slot BLE au démarrage | MAY |
 
 ### 4.2 Transmission (Watch ↔ Phone)
 
 | ID | Exigence | Priorité |
 |---|---|---|
 | **FR-010** | Le watch MUST transmettre les paquets via Connect IQ phone-app messaging (BLE) | MUST |
-| **FR-011** | Le watch MUST limiter 1 paquet en vol (single-in-flight) pour éviter la saturation BLE | MUST |
+| **FR-011** | Le watch MUST **strictement** limiter à **1 `Communications.transmit` en vol** — chaque appel MUST attendre `onComplete()` OR `onError()` avant le suivant (corrige le bug de v1.0 à 93 % loss) | **MUST** |
+| **FR-011b** | Le watch MUST utiliser un **Timer séparé** (période 250 ms) pour sérialiser + transmettre les batches ; le callback capteur lui MUST uniquement accumuler (pas de transmit, pas de flash, pas de SensorHistory) | **MUST** |
 | **FR-012** | Le watch MUST re-transmettre les paquets non-acquittés après reconnexion BLE | SHOULD |
 | **FR-013** | Le phone MUST acquitter chaque **data packet** via `{"ack": pi}` | MUST |
 | **FR-014** | Le phone MUST ignorer la validation "samples non-vide" pour les **meta packets** | MUST |
@@ -189,7 +200,8 @@ UC-08  Analyser les données via le script Python
 | **NFR-001** | Latence watch→phone par paquet | < 500 ms médiane |
 | **NFR-002** | Fréquence IMU effective | ≥ 95 % de 100 Hz (soit ≥ 95 Hz mesuré) |
 | **NFR-003** | Débit soutenu BLE | ≥ 3 paquets/s soutenus (≥ 2,5 Ko/s) |
-| **NFR-004** | Budget CPU dans un callback capteur | < 400 ms par délivrance (1s de data) |
+| **NFR-004** | Budget CPU dans un callback capteur (`onSensorDataReceived`) | < 50 ms — accumulation pure uniquement, aucun I/O, aucune sérialisation JSON, aucun appel `SensorHistory.*`, aucun `Communications.transmit`, aucun `Application.Storage.setValue` |
+| **NFR-004b** | Budget CPU dans un callback Timer de dispatch (émission de paquet) | < 200 ms par tick (250 ms interval → 55 % headroom) |
 | **NFR-005** | Consommation batterie | < 20 %/h pendant enregistrement continu |
 
 ### 5.2 Fiabilité
@@ -453,6 +465,8 @@ t=N           Session STOP
 | **INV-005** | Un paquet data a `pt` absent/null ET `s` non-vide (sauf si flag PARTIAL_PACKET) | PacketSerializer |
 | **INV-006** | Un ACK n'est jamais envoyé pour un meta packet | GarminReceiver |
 | **INV-007** | Après `ackUpTo(N)`, aucune entrée de la persistent queue n'a `pi ≤ N` | PersistentQueue |
+| **INV-008** | À tout instant, **au plus 1 appel `Communications.transmit()` est en vol** (pas encore `onComplete`/`onError`). Violation = perte silencieuse de paquets (cause du bug v1.0 93 % loss) | CommunicationManager._transmitPending |
+| **INV-009** | Le callback `onSensorDataReceived` n'appelle AUCUNE API bloquante (pas de `SensorHistory.*`, pas de `Communications.transmit`, pas de `Application.Storage.setValue`) — uniquement `accumulate()` | SensorManager |
 
 ---
 
