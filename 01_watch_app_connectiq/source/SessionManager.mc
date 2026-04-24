@@ -113,7 +113,14 @@ class SessionManager {
         _sessionStartTimerMs  = System.getTimer();
 
         // ── Build and send the session header packet FIRST ─────────
-        _sendHeaderPacket();
+        // Wrapped in its own try/catch — failure is non-fatal; the
+        // data stream still starts even if the header is lost.
+        try {
+            _sendHeaderPacket();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: header packet exception: " + ex.getErrorMessage());
+            _errorCount++;
+        }
 
         (_sensorManager   as SensorManager).register();
         (_positionManager as PositionManager).enable();
@@ -293,9 +300,8 @@ class SessionManager {
         if (_sensorManager != null) {
             var sm = _sensorManager as SensorManager;
             imuFreq = sm.getMeasuredFrequency();
-            var hrSnap = sm.getHrSnapshot();
-            lastHr = hrSnap.get("hr") as Number;
-            hasRr  = hrSnap.get("hasRr") as Boolean;
+            lastHr  = sm.getLastHrBpm();      // cached — no Sensor.getInfo() call
+            hasRr   = sm.hasRrIntervals();
         }
         if (_batchManager != null) {
             batches = (_batchManager as BatchManager).getBatchesSent();

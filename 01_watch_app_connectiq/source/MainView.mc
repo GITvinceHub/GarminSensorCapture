@@ -56,45 +56,60 @@ class MainView extends WatchUi.View {
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_BLACK);
         dc.clear();
 
-        var status = _sessionManager.getStatus();
+        try {
+            var status = _sessionManager.getStatus();
 
-        // ── Capture menu overlay (takes full screen) ──────────────
-        if (_uiState.isMenuOpen()) {
-            _drawMenu(dc, status);
-            return;
+            // ── Capture menu overlay (takes full screen) ──────────
+            if (_uiState.isMenuOpen()) {
+                _drawMenu(dc, status);
+            } else {
+                // ── Screen routing ────────────────────────────────
+                var screen = _uiState.getScreenIndex();
+                if (screen == UiState.SCREEN_HOME) {
+                    _drawHome(dc, status);
+                } else if (screen == UiState.SCREEN_IMU) {
+                    _drawImu(dc, status);
+                } else if (screen == UiState.SCREEN_GPS) {
+                    _drawGps(dc, status);
+                } else if (screen == UiState.SCREEN_HR) {
+                    _drawHr(dc, status);
+                } else if (screen == UiState.SCREEN_META) {
+                    _drawMeta(dc, status);
+                } else {
+                    _drawRecording(dc, status);
+                }
+            }
+
+            // ── Common overlays ───────────────────────────────────
+            _drawNavDots(dc);
+            _drawButtonLockIndicator(dc);
+
+        } catch (ex instanceof Lang.Exception) {
+            // Surface any runtime draw error directly on screen
+            // so it is visible without a connected debugger.
+            dc.setColor(Graphics.COLOR_RED, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(_cx, _cy - 35, Graphics.FONT_SMALL,
+                        "ERREUR", Graphics.TEXT_JUSTIFY_CENTER);
+            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(_cx, _cy, Graphics.FONT_XTINY,
+                        ex.getErrorMessage(), Graphics.TEXT_JUSTIFY_CENTER);
+            dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(_cx, _cy + 35, Graphics.FONT_XTINY,
+                        "scr:" + _uiState.getScreenIndex().toString(),
+                        Graphics.TEXT_JUSTIFY_CENTER);
         }
-
-        // ── Screen routing ────────────────────────────────────────
-        var screen = _uiState.getScreenIndex();
-        if (screen == UiState.SCREEN_HOME) {
-            _drawHome(dc, status);
-        } else if (screen == UiState.SCREEN_IMU) {
-            _drawImu(dc, status);
-        } else if (screen == UiState.SCREEN_GPS) {
-            _drawGps(dc, status);
-        } else if (screen == UiState.SCREEN_HR) {
-            _drawHr(dc, status);
-        } else if (screen == UiState.SCREEN_META) {
-            _drawMeta(dc, status);
-        } else {
-            _drawRecording(dc, status);
-        }
-
-        // ── Common overlays ───────────────────────────────────────
-        _drawNavDots(dc);
-        _drawButtonLockIndicator(dc);
     }
 
     // ══════════════════════════════════════════════════════════════
     // Screen 1 — Home
     // ══════════════════════════════════════════════════════════════
     private function _drawHome(dc as Graphics.Dc, status as Dictionary) as Void {
-        var state    = status.get("state") as Number;
+        var state    = (status.get("state") as Number);
         var isRec    = (state == SessionManager.STATE_RECORDING);
-        var elapsed  = status.get("elapsedMs") as Number;
-        var lastHr   = status.get("lastHr") as Number;
-        var hasGps   = status.get("hasGpsFix") as Boolean;
-        var isLinked = status.get("isLinked") as Boolean;
+        var elapsed  = (status.get("elapsedMs") as Number);
+        var lastHr   = (status.get("lastHr") as Number);
+        var hasGps   = (status.get("hasGpsFix") == true);
+        var isLinked = (status.get("isLinked") == true);
         var battery  = System.getSystemStats().battery.toNumber();
 
         // ── Title / status ────────────────────────────────────────
@@ -265,7 +280,7 @@ class MainView extends WatchUi.View {
             ? (pm as PositionManager).getUiSnapshot()
             : ({ "hasValidFix" => false } as Dictionary);
 
-        var hasF = snap.get("hasValidFix") as Boolean;
+        var hasF = (snap.get("hasValidFix") == true);
 
         // Title
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
@@ -320,9 +335,9 @@ class MainView extends WatchUi.View {
             ? (sm as SensorManager).getHrSnapshot()
             : ({ "hr" => 0, "hasRr" => false, "rrLast" => 0 } as Dictionary);
 
-        var hr    = hrSnap.get("hr") as Number;
-        var hasRr = hrSnap.get("hasRr") as Boolean;
-        var rrLast = hrSnap.get("rrLast") as Number;
+        var hr     = (hrSnap.get("hr") as Number);
+        var hasRr  = (hrSnap.get("hasRr") == true);
+        var rrLast = (hrSnap.get("rrLast") as Number);
 
         // Title
         dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
@@ -439,12 +454,12 @@ class MainView extends WatchUi.View {
     // Screen 6 — Recording stats
     // ══════════════════════════════════════════════════════════════
     private function _drawRecording(dc as Graphics.Dc, status as Dictionary) as Void {
-        var state   = status.get("state") as Number;
+        var state   = (status.get("state") as Number);
         var isRec   = (state == SessionManager.STATE_RECORDING);
-        var elapsed = status.get("elapsedMs") as Number;
-        var packets = status.get("packetCount") as Number;
-        var errors  = status.get("errorCount") as Number;
-        var fileB   = status.get("estimatedFileSizeBytes") as Number;
+        var elapsed = (status.get("elapsedMs") as Number);
+        var packets = (status.get("packetCount") as Number);
+        var errors  = (status.get("errorCount") as Number);
+        var fileB   = (status.get("estimatedFileSizeBytes") as Number);
 
         // Recording indicator dot
         if (isRec) {

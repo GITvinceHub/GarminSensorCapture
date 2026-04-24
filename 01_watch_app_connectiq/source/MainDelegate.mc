@@ -54,68 +54,73 @@ class MainDelegate extends WatchUi.InputDelegate {
 
     //! Act on key release, computing hold duration for long-press detection.
     function onKeyReleased(keyEvent as WatchUi.KeyEvent) as Boolean {
-        var key  = keyEvent.getKey();
-        var held = System.getTimer() - _pressTime;
+        try {
+            var key  = keyEvent.getKey();
+            var held = System.getTimer() - _pressTime;
 
-        // ── Button-lock filter ────────────────────────────────────
-        // Only DOWN (to unlock) passes through when locked.
-        if (_uiState.isButtonLocked() && key != WatchUi.KEY_DOWN) {
-            WatchUi.requestUpdate();  // show lock icon flash
-            return true;
-        }
-
-        // ── Capture menu navigation ───────────────────────────────
-        if (_uiState.isMenuOpen()) {
-            return _handleMenuKey(key);
-        }
-
-        // ── Normal button handling ────────────────────────────────
-        if (key == WatchUi.KEY_START) {
-            if (held >= LONG_PRESS_MS) {
-                _sessionManager.restartNewSession();
-            } else {
-                _handleStartStop();
+            // ── Button-lock filter ────────────────────────────────
+            if (_uiState.isButtonLocked() && key != WatchUi.KEY_DOWN) {
+                WatchUi.requestUpdate();
+                return true;
             }
-            WatchUi.requestUpdate();
-            return true;
-        }
 
-        if (key == WatchUi.KEY_ESC) {
-            if (held >= LONG_PRESS_MS) {
-                _handleBackLong();
-            } else {
-                _sessionManager.markEvent();
+            // ── Capture menu navigation ───────────────────────────
+            if (_uiState.isMenuOpen()) {
+                return _handleMenuKey(key);
             }
-            WatchUi.requestUpdate();
-            return true;
-        }
 
-        if (key == WatchUi.KEY_UP) {
-            _uiState.nextScreen();
-            WatchUi.requestUpdate();
-            return true;
-        }
-
-        // KEY_MENU = long-press UP fired by the OS (no duration check needed)
-        if (key == WatchUi.KEY_MENU) {
-            _uiState.openMenu();
-            WatchUi.requestUpdate();
-            return true;
-        }
-
-        if (key == WatchUi.KEY_DOWN) {
-            if (held >= LONG_PRESS_MS) {
-                _uiState.toggleButtonLock();
-            } else {
-                _uiState.nextDetail();
+            // ── Normal button handling ────────────────────────────
+            if (key == WatchUi.KEY_START) {
+                if (held >= LONG_PRESS_MS) {
+                    _sessionManager.restartNewSession();
+                } else {
+                    _handleStartStop();
+                }
+                WatchUi.requestUpdate();
+                return true;
             }
-            WatchUi.requestUpdate();
-            return true;
-        }
 
-        // ENTER (some device mappings) — treat as UP for screen cycling
-        if (key == WatchUi.KEY_ENTER) {
-            _uiState.nextScreen();
+            if (key == WatchUi.KEY_ESC) {
+                if (held >= LONG_PRESS_MS) {
+                    _handleBackLong();
+                } else {
+                    _sessionManager.markEvent();
+                }
+                WatchUi.requestUpdate();
+                return true;
+            }
+
+            if (key == WatchUi.KEY_UP) {
+                _uiState.nextScreen();
+                WatchUi.requestUpdate();
+                return true;
+            }
+
+            // KEY_MENU = long-press UP injected by OS
+            if (key == WatchUi.KEY_MENU) {
+                _uiState.openMenu();
+                WatchUi.requestUpdate();
+                return true;
+            }
+
+            if (key == WatchUi.KEY_DOWN) {
+                if (held >= LONG_PRESS_MS) {
+                    _uiState.toggleButtonLock();
+                } else {
+                    _uiState.nextDetail();
+                }
+                WatchUi.requestUpdate();
+                return true;
+            }
+
+            if (key == WatchUi.KEY_ENTER) {
+                _uiState.nextScreen();
+                WatchUi.requestUpdate();
+                return true;
+            }
+
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainDelegate: key handler exception: " + ex.getErrorMessage());
             WatchUi.requestUpdate();
             return true;
         }

@@ -57,6 +57,9 @@ class SensorManager {
     //! Last RR intervals captured from the batched HeartRateData
     private var _lastRrIntervals as Array<Number> or Null;
 
+    //! Last polled heart-rate in bpm (cached so getStatus() avoids Sensor.getInfo())
+    private var _lastHrBpm as Number;
+
     //! @param callback Function called with each new sample
     function initialize(callback as SampleCallback) {
         _callback         = callback;
@@ -66,7 +69,8 @@ class SensorManager {
         _freqWindowStart  = System.getTimer();
         _measuredFrequency = PRIMARY_RATE_HZ.toFloat();
         _isRegistered     = false;
-        _lastRrIntervals   = null;
+        _lastRrIntervals  = null;
+        _lastHrBpm        = 0;
     }
 
     //! Register sensor listeners. Called when session starts.
@@ -141,6 +145,7 @@ class SensorManager {
         if (info != null && info has :heartRate && info.heartRate != null) {
             hrNow = info.heartRate as Number;
         }
+        _lastHrBpm = hrNow;  // cache for getStatus() calls
 
         // Determine batch size from the primary sensor (accel)
         var batchSize = 0;
@@ -254,6 +259,16 @@ class SensorManager {
     //! Typically 1-3 values per 1-second batch. Null if HR data was unavailable.
     function getLastRrIntervals() as Array<Number> or Null {
         return _lastRrIntervals;
+    }
+
+    //! Last heart-rate bpm cached from the batch callback (no Sensor.getInfo() call).
+    function getLastHrBpm() as Number {
+        return _lastHrBpm;
+    }
+
+    //! True if the last batch delivered at least one RR interval.
+    function hasRrIntervals() as Boolean {
+        return _lastRrIntervals != null && (_lastRrIntervals as Array<Number>).size() > 0;
     }
 
     //! Poll real-time Sensor.Info values (pressure, altitude, temperature,
@@ -512,8 +527,8 @@ class SensorManager {
         var start = size - maxPoints;
         if (start < 0) { start = 0; }
         var sumSq = 0.0f;
-        var maxV  = -1e9f;
-        var minV  =  1e9f;
+        var maxV  = -999999.0f;
+        var minV  =  999999.0f;
         var count = 0;
         for (var i = start; i < size; i++) {
             var s = _buffer[i] as Dictionary;
