@@ -84,7 +84,16 @@ class CommunicationManager {
             _packetsFailed += 1;
             _isLinkUp = false;
             // Re-queue at the head so we don't lose it.
-            _queue = [packet].addAll(_queue);
+            // BUG FIX: `Array.addAll()` returns Void in Monkey C, so the previous
+            // `_queue = [packet].addAll(_queue)` silently set _queue to null,
+            // causing every subsequent call into CommunicationManager to NPE
+            // inside the try/catch (silent packet loss). Build a fresh Array
+            // with the packet at the head instead.
+            var restored = [packet];
+            for (var i = 0; i < _queue.size(); i += 1) {
+                restored.add(_queue[i]);
+            }
+            _queue = restored;
             // Do NOT immediately retry — let the dispatch Timer try again.
         }
     }

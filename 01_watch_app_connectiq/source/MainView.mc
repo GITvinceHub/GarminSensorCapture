@@ -132,6 +132,16 @@ class MainView extends WatchUi.View {
             var pktStr = "PKT " + pSent + "/" + pFail + "  Q" + qSize + " B" + bufSize;
             dc.drawText(cx, (h * 0.38).toNumber(), Graphics.FONT_XTINY, pktStr, Graphics.TEXT_JUSTIFY_CENTER);
 
+            // Row 3b: DIAG counters — visible proof that sensor + dispatch pipelines run.
+            // Expected after 5 s: CB ≈ 5, SP ≈ 500, DT ≈ 20.
+            var cbCount = _session.getSensorCallbackCount();
+            var spCount = _session.getSamplesPushed();
+            var dtCount = _session.getDispatchTickCount();
+            var diagStr = "CB" + cbCount + " SP" + spCount + " DT" + dtCount;
+            dc.setColor(Graphics.COLOR_LT_GRAY, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cx, (h * 0.45).toNumber(), Graphics.FONT_XTINY, diagStr, Graphics.TEXT_JUSTIFY_CENTER);
+            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+
             // Row 4: BLE / GPS indicators.
             var bleStr = _session.isLinkUp() ? _sBleOk : _sBleX;
             var gpsStr = _session.hasGpsFix() ? _sGpsOk : _sGpsNo;

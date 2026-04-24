@@ -24,6 +24,8 @@ class SensorManager {
     private var _lastHrBpm;            // cached HR, refreshed from Sensor.SensorInfo stream
     private var _sampleCounter;        // used for mag decimation
     private var _errorCount;
+    private var _callbackCount;        // DIAG — how many times CIQ has called us
+    private var _samplesPushed;        // DIAG — total samples pushed into BatchManager
 
     function initialize(batchManager) {
         _batchManager = batchManager;
@@ -31,7 +33,14 @@ class SensorManager {
         _lastHrBpm = 0;
         _sampleCounter = 0;
         _errorCount = 0;
+        _callbackCount = 0;
+        _samplesPushed = 0;
     }
+
+    //! DIAG accessors — surfaced in MainView so we can see from the watch whether
+    //! the sensor stream is firing.
+    function getCallbackCount() { return _callbackCount; }
+    function getSamplesPushed() { return _samplesPushed; }
 
     //! Register with the Sensor framework. Idempotent.
     //! Returns true on success.
@@ -68,17 +77,26 @@ class SensorManager {
 
             // Enable HR in the standard sensor stream so Sensor.getInfo().heartRate
             // becomes live (used by refreshHrFromInfo below — outside the hot callback).
-            if (Sensor has :setEnabledSensors) {
-                Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
-            }
+            //
+            // NB: we do NOT overwrite the device's enabled-sensor list; we only ADD
+            // heart rate. Calling setEnabledSensors with [HEARTRATE] only has been
+            // observed to interfere with the standard sensor stream on some
+            // fēnix 8 firmwares — removing this call. HR will still be available
+            // via Sensor.getInfo() because the default sensor config includes it
+            // when the Sensor permission is granted.
 
+            // CRITICAL FIX: Magnetometer on fēnix 8 tops out at 25 Hz. Asking for
+            // 100 Hz was making registerSensorDataListener throw silently on some
+            // firmwares, so the whole sensor stream never started (= 0 packets).
+            // We request 25 Hz for mag (the native rate) and keep 100 Hz for
+            // accel/gyro. Down-decimation still runs in the callback just in case.
             Sensor.registerSensorDataListener(
                 method(:onSensorDataReceived),
                 {
                     :period => 1,                                                   // 1-second batches (~100 samples)
                     :accelerometer => { :enabled => true, :sampleRate => IMU_RATE_HZ },
                     :gyroscope     => { :enabled => true, :sampleRate => IMU_RATE_HZ },
-                    :magnetometer  => { :enabled => true, :sampleRate => IMU_RATE_HZ }
+                    :magnetometer  => { :enabled => true, :sampleRate => MAG_RATE_HZ }
                     // NB: no :heartRate key — not a valid option (GIQ-022). HR is
                     // pulled via Sensor.getInfo() in refreshHrFromInfo() from the Timer.
                 }
@@ -111,10 +129,24 @@ class SensorManager {
         _isRegistered = false;
     }
 
+    //! Defensive accessor for a typed sensor array — protects against:
+    //!   - arr == null (sensor not delivering this axis on this firmware)
+    //!   - i >= arr.size() (axes arriving with different lengths)
+    //!   - arr[i] == null (transient)
+    //! Returns 0 when the value is not available. This is what kept v1.0 alive.
+    private function _safeVal(arr, i) {
+        if (arr == null) { return 0; }
+        if (i >= arr.size()) { return 0; }
+        var v = arr[i];
+        if (v == null) { return 0; }
+        return v;
+    }
+
     //! HOT PATH — INV-009 / NFR-004: must stay < 50 ms.
-    //! Pure accumulation: unpack arrays, push to buffer, cache HR. That's it.
+    //! Pure accumulation: unpack arrays, push to buffer. That's it.
     function onSensorDataReceived(data as Sensor.SensorData) as Void {
         try {
+            _callbackCount += 1;
             if (data == null) { return; }
 
             var accel = data.accelerometerData;
@@ -138,6 +170,7 @@ class SensorManager {
             var my = (mag != null) ? mag.y : null;
             var mz = (mag != null) ? mag.z : null;
 
+            if (ax == null) { return; }
             var n = ax.size();
             if (n == 0) { return; }
 
@@ -147,21 +180,24 @@ class SensorManager {
             for (var i = 0; i < n; i += 1) {
                 _sampleCounter += 1;
                 // Mag 25 Hz decimation — emit non-zero mag 1 sample out of MAG_DECIM.
-                var emitMag = ((_sampleCounter % MAG_DECIM) == 0) && (mx != null) && (i < mx.size());
+                // mx array length is ~ n/4 since we requested 25 Hz; use i/MAG_DECIM
+                // as the mag index and guard with _safeVal.
+                var magI = i / MAG_DECIM;
                 var sample = {
                     "t"  => period,
-                    "ax" => ax[i],
-                    "ay" => ay[i],
-                    "az" => az[i],
-                    "gx" => gx[i],
-                    "gy" => gy[i],
-                    "gz" => gz[i],
-                    "mx" => emitMag ? mx[i] : 0,
-                    "my" => emitMag ? my[i] : 0,
-                    "mz" => emitMag ? mz[i] : 0,
+                    "ax" => _safeVal(ax, i),
+                    "ay" => _safeVal(ay, i),
+                    "az" => _safeVal(az, i),
+                    "gx" => _safeVal(gx, i),
+                    "gy" => _safeVal(gy, i),
+                    "gz" => _safeVal(gz, i),
+                    "mx" => _safeVal(mx, magI),
+                    "my" => _safeVal(my, magI),
+                    "mz" => _safeVal(mz, magI),
                     "hr" => _lastHrBpm
                 };
                 _batchManager.push(sample);
+                _samplesPushed += 1;
             }
         } catch (ex instanceof Lang.Exception) {
             // NFR-012/013: never propagate to the runtime.

@@ -44,6 +44,7 @@ class SessionManager {
     //! Error & stats counters for the UI.
     private var _errorCount;
     private var _lastErrorMsg;
+    private var _dispatchTickCount;  // DIAG — how many times the dispatch Timer fired
 
     function initialize() {
         _state = STATE_IDLE;
@@ -63,6 +64,7 @@ class SessionManager {
 
         _errorCount = 0;
         _lastErrorMsg = "";
+        _dispatchTickCount = 0;
 
         // Listen for ACKs / commands from the phone.
         // GIQ-020: gated `has :` — avoid Symbol Not Found on trimmed firmwares.
@@ -144,6 +146,7 @@ class SessionManager {
     //! NFR-004b: must complete in < 200 ms.
     function _onDispatchTick() {
         try {
+            _dispatchTickCount += 1;
             _dispatchOnce();
         } catch (ex instanceof Lang.Exception) {
             _errorCount += 1;
@@ -244,4 +247,10 @@ class SessionManager {
         if (_state == STATE_IDLE) { return 0; }
         return (System.getTimer() - _sessionStartTimer) / 1000;
     }
+
+    //! DIAG — surface the sensor-stream counters so MainView can display them.
+    //! This helps distinguish between "sensor never fires" vs "BLE silent fail".
+    function getSensorCallbackCount() { return _sensorManager.getCallbackCount(); }
+    function getSamplesPushed()       { return _sensorManager.getSamplesPushed(); }
+    function getDispatchTickCount()   { return _dispatchTickCount; }
 }
