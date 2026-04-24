@@ -46,17 +46,27 @@ class MainDelegate extends WatchUi.InputDelegate {
         _pressTime      = 0;
     }
 
-    //! Record press timestamp when a key is pushed down.
+    //! Record press timestamp on key-down AND consume the event so the OS
+    //! does not inject secondary events (e.g. KEY_MENU from a long UP press).
+    //! All logic is deferred to onKeyReleased where held duration is known.
     function onKey(keyEvent as WatchUi.KeyEvent) as Boolean {
         _pressTime = System.getTimer();
-        return false;  // key-down never consumes the event
+        return true;  // consume key-down — prevents OS KEY_MENU injection
     }
 
     //! Act on key release, computing hold duration for long-press detection.
+    //!
+    //! KEY_UP long-press opens the capture menu — handled here rather than
+    //! relying on the OS to inject KEY_MENU (which is unreliable in the
+    //! simulator and varies across firmware versions).
     function onKeyReleased(keyEvent as WatchUi.KeyEvent) as Boolean {
         try {
             var key  = keyEvent.getKey();
             var held = System.getTimer() - _pressTime;
+
+            // Guard: held should never be negative (timer wrap) or absurdly
+            // large (pressTime was never set).  Clamp to [0, 10 000] ms.
+            if (held < 0 || held > 10000) { held = 0; }
 
             // ── Button-lock filter ────────────────────────────────
             if (_uiState.isButtonLocked() && key != WatchUi.KEY_DOWN) {
@@ -70,6 +80,7 @@ class MainDelegate extends WatchUi.InputDelegate {
             }
 
             // ── Normal button handling ────────────────────────────
+
             if (key == WatchUi.KEY_START) {
                 if (held >= LONG_PRESS_MS) {
                     _sessionManager.restartNewSession();
@@ -90,13 +101,20 @@ class MainDelegate extends WatchUi.InputDelegate {
                 return true;
             }
 
+            // KEY_UP  short → next screen   long → open capture menu
+            // (Long-press is detected from our own timer, not from OS-injected
+            // KEY_MENU, because onKey now consumes the key-down event.)
             if (key == WatchUi.KEY_UP) {
-                _uiState.nextScreen();
+                if (held >= LONG_PRESS_MS) {
+                    _uiState.openMenu();
+                } else {
+                    _uiState.nextScreen();
+                }
                 WatchUi.requestUpdate();
                 return true;
             }
 
-            // KEY_MENU = long-press UP injected by OS
+            // KEY_MENU: kept as a fallback in case some firmware still injects it.
             if (key == WatchUi.KEY_MENU) {
                 _uiState.openMenu();
                 WatchUi.requestUpdate();
@@ -113,8 +131,15 @@ class MainDelegate extends WatchUi.InputDelegate {
                 return true;
             }
 
+            // KEY_ENTER: the fēnix 8 Pro simulator fires KEY_ENTER for the red
+            // START button.  Treat it identically to KEY_START so start/stop
+            // works in the simulator without breaking the physical device.
             if (key == WatchUi.KEY_ENTER) {
-                _uiState.nextScreen();
+                if (held >= LONG_PRESS_MS) {
+                    _sessionManager.restartNewSession();
+                } else {
+                    _handleStartStop();
+                }
                 WatchUi.requestUpdate();
                 return true;
             }

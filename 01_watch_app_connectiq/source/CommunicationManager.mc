@@ -3,52 +3,82 @@ import Toybox.Lang;
 import Toybox.System;
 
 //! Manages phone-app messaging to the Android companion app.
-//! Uses Toybox.Communications.transmit to send JSON packets,
-//! and Communications.registerForPhoneAppMessages to receive ACKs.
 //!
-//! Features:
-//! - Send queue (max MAX_QUEUE_SIZE packets) while phone unreachable
-//! - ConnectionListener tracks success/failure
-//! - Auto-retry pending queue after a successful transmit
+//! Design: single-in-flight model.
+//!   Only one Communications.transmit() call is outstanding at any time.
+//!   The next packet is sent only after the listener fires onComplete() or
+//!   onError() for the previous one.  This prevents CIQ runtime warnings
+//!   ("Communications transmit queue full") when the phone is absent.
+//!
+//! Retry back-off: after a transmit failure we wait RETRY_INTERVAL_MS before
+//!   the next attempt.  Queued packets accumulate during the wait.
+//!
+//! Persistent ACK queue (Level 2):
+//!   A PersistentQueue reference can be injected via setPersistentQueue().
+//!   When the Android companion sends {"ack": N}, all stored packets with
+//!   pi ≤ N are deleted from flash.  On BLE reconnect, up to
+//!   RESEND_BATCH_SIZE unACK-ed packets are re-injected into the send queue.
 class CommunicationManager {
 
-    //! Callback type: status change (connected/disconnected)
+    //! Callback type: status change (connected / disconnected)
     typedef StatusCallback as Method(connected as Boolean) as Void;
 
-    //! Maximum packets in send queue
-    private const MAX_QUEUE_SIZE = 20;
+    //! Maximum packets held in the in-memory send queue
+    private const MAX_QUEUE_SIZE    = 20;
 
-    //! Status callback
-    private var _statusCallback as StatusCallback;
+    //! Minimum ms between transmit attempts after a failure (back-off)
+    private const RETRY_INTERVAL_MS = 5000;
 
-    //! Whether phone messaging appears to be working (last transmit succeeded)
-    private var _isConnected as Boolean;
+    //! Number of persistent-queue entries re-injected on BLE reconnect
+    private const RESEND_BATCH_SIZE = 20;
 
-    //! Send queue (holds payloads when disconnected)
-    private var _queue as Array<String>;
+    //! Status callback (injected by SessionManager)
+    private var _statusCallback  as StatusCallback;
 
-    //! Bound listener instance
-    private var _listener as CommunicationManager.CommListener;
+    //! Whether the last transmit succeeded (connection assumed live)
+    private var _isConnected     as Boolean;
 
-    //! Total packets successfully transmitted
-    private var _packetsSent as Number;
+    //! In-memory send queue (oldest-drop when full)
+    private var _queue           as Array<String>;
 
-    //! Total transmit failures
-    private var _sendFailures as Number;
+    //! Bound listener (reused across all transmit calls)
+    private var _listener        as CommunicationManager.CommListener;
 
-    //! @param statusCallback Called when connection status changes
+    //! True while a Communications.transmit() call is outstanding
+    private var _transmitPending as Boolean;
+
+    //! getTimer() value at the most recent failure (for back-off)
+    private var _lastFailureMs   as Number;
+
+    //! Reference to the persistent ACK queue (optional — null if not set)
+    private var _persistentQueue as PersistentQueue or Null;
+
+    //! Total packets successfully ACK-ed by the system
+    private var _packetsSent     as Number;
+
+    //! Total transmit failures (exception or onError callback)
+    private var _sendFailures    as Number;
+
+    //! @param statusCallback Invoked on connection-state changes
     function initialize(statusCallback as StatusCallback) {
-        _statusCallback = statusCallback;
-        _isConnected    = false;
-        _queue          = [] as Array<String>;
-        _packetsSent    = 0;
-        _sendFailures   = 0;
-        _listener       = new CommListener(self);
+        _statusCallback  = statusCallback;
+        _isConnected     = false;
+        _queue           = [] as Array<String>;
+        _listener        = new CommListener(self);
+        _transmitPending = false;
+        _lastFailureMs   = 0;
+        _persistentQueue = null;
+        _packetsSent     = 0;
+        _sendFailures    = 0;
     }
 
-    //! Open communications: register phone-app message receiver.
-    //! With the modern Communications API there is no "channel" to open —
-    //! transmit() handles the phone hop each time.
+    //! Inject the persistent-queue dependency.
+    //! Called by SessionManager after both objects are constructed.
+    function setPersistentQueue(pq as PersistentQueue) as Void {
+        _persistentQueue = pq;
+    }
+
+    //! Register the phone-app message receiver.
     function openChannel() as Void {
         if (Communications has :registerForPhoneAppMessages) {
             try {
@@ -60,126 +90,166 @@ class CommunicationManager {
         }
     }
 
-    //! Close communications: unregister phone-app handler + clear queue.
+    //! Unregister and discard the in-memory queue.
     function closeChannel() as Void {
         if (Communications has :registerForPhoneAppMessages) {
             try {
                 Communications.registerForPhoneAppMessages(null);
-            } catch (ex instanceof Lang.Exception) {
-                System.println("CommManager: unregister failed: " + ex.getErrorMessage());
-            }
+            } catch (ex instanceof Lang.Exception) { }
         }
-        _isConnected = false;
-        _queue = [] as Array<String>;
+        _isConnected     = false;
+        _transmitPending = false;
+        _queue           = [] as Array<String>;
     }
 
-    //! Send a JSON packet string to the companion app.
-    //! If previous transmits failed, also queue for later retry.
+    //! Enqueue a JSON string for delivery.
     //! @param data JSON string to send
     function sendPacket(data as String) as Void {
-        if (data == null || data.length() == 0) {
-            return;
-        }
-
-        // If we have a backlog, queue first then try to drain
-        if (_queue.size() > 0) {
-            _enqueue(data);
-            _drainQueue();
-        } else {
-            _transmit(data);
+        if (data == null || data.length() == 0) { return; }
+        _enqueue(data);
+        if (!_transmitPending) {
+            _trySend();
         }
     }
 
-    //! Queue a packet, dropping oldest if at capacity.
+    // ── Private helpers ───────────────────────────────────────────
+
+    //! Add data to the tail of the in-memory queue, dropping oldest if full.
     private function _enqueue(data as String) as Void {
         if (_queue.size() >= MAX_QUEUE_SIZE) {
             _queue = _queue.slice(1, null);
-            System.println("CommManager: queue full, dropped oldest packet");
         }
         _queue.add(data);
     }
 
-    //! Transmit a payload via Communications.transmit.
-    private function _transmit(data as String) as Void {
+    //! Attempt to transmit the head of the in-memory queue.
+    //! Conditions: queue non-empty, no outstanding transmit, back-off elapsed.
+    private function _trySend() as Void {
+        if (_queue.size() == 0 || _transmitPending) { return; }
+
+        // Respect back-off interval after failures
+        if (!_isConnected) {
+            var now = System.getTimer();
+            if ((now - _lastFailureMs) < RETRY_INTERVAL_MS) {
+                return;
+            }
+        }
+
+        var packet = _queue[0];
+        _queue = _queue.slice(1, null);
+        _transmitPending = true;
+
         try {
-            Communications.transmit(data, null, _listener);
+            Communications.transmit(packet, null, _listener);
         } catch (ex instanceof Lang.Exception) {
-            System.println("CommManager: transmit exception: " + ex.getErrorMessage());
-            _handleFailure();
-            _enqueue(data);
+            // Synchronous failure (rare): treat like async onError
+            _transmitPending = false;
+            _onTransmitFailed();
+            _enqueue(packet);   // re-queue for retry after back-off
         }
     }
 
-    //! Attempt to flush the queue. Stops at first failure
-    //! (further failures are reported asynchronously via the listener).
-    private function _drainQueue() as Void {
-        while (_queue.size() > 0 && _isConnected) {
-            var packet = _queue[0];
-            _queue = _queue.slice(1, null);
-            _transmit(packet);
-        }
-    }
-
-    //! Called by CommListener on successful transmit.
-    function _handleSuccess() as Void {
-        var wasConnected = _isConnected;
+    //! Called by CommListener when the system ACK-s a transmit.
+    function _onTransmitOk() as Void {
+        _transmitPending = false;
+        var wasDisconnected = !_isConnected;
         _isConnected = true;
         _packetsSent++;
-        if (!wasConnected) {
+
+        if (wasDisconnected) {
+            System.println("CommManager: BLE link restored");
             _statusCallback.invoke(true);
+            // ── Re-inject unACK-ed packets from persistent queue ──────
+            // Android will deduplicate by packet index (pi) if it already
+            // has some of these; the watch retransmits them to guarantee
+            // no data is permanently lost due to the disconnection.
+            _injectResendBatch();
         }
-        if (_queue.size() > 0) {
-            _drainQueue();
-        }
+
+        _trySend();   // pipeline: send next queued packet immediately
     }
 
-    //! Called by CommListener on transmit error.
-    function _handleFailure() as Void {
-        var wasConnected = _isConnected;
-        _isConnected  = false;
+    //! Called by CommListener (or exception path) on transmit failure.
+    function _onTransmitFailed() as Void {
+        _transmitPending = false;
+        _lastFailureMs   = System.getTimer();
         _sendFailures++;
+        var wasConnected = _isConnected;
+        _isConnected = false;
         if (wasConnected) {
+            System.println("CommManager: BLE link lost (failures="
+                + _sendFailures.toString() + ")");
             _statusCallback.invoke(false);
         }
+        // Do NOT retry immediately — _trySend() throttles via RETRY_INTERVAL_MS.
+        // New sensor packets arrive every ~250 ms and each call to sendPacket()
+        // will re-trigger _trySend(), so no polling timer is needed.
     }
 
-    //! Handle incoming messages from the phone (e.g. ACKs).
-    //! @param msg PhoneAppMessage with data attribute
+    //! Re-enqueue up to RESEND_BATCH_SIZE packets from the persistent queue
+    //! so they are retransmitted after a BLE reconnection.
+    //! Persistent-queue entries are removed only when Android ACKs them,
+    //! not here.
+    private function _injectResendBatch() as Void {
+        if (_persistentQueue == null) { return; }
+        var pq    = _persistentQueue as PersistentQueue;
+        var batch = pq.getResendBatch(RESEND_BATCH_SIZE);
+        if (batch.size() == 0) { return; }
+
+        for (var i = 0; i < batch.size(); i++) {
+            var entry = batch[i] as Dictionary;
+            var json  = entry.get("d");
+            if (json != null) {
+                _enqueue(json as String);
+            }
+        }
+        System.println("CommManager: " + batch.size().toString()
+            + " unACK-ed packets re-queued for resend (persistent pending="
+            + pq.size().toString() + ")");
+    }
+
+    //! Handle incoming messages from the phone.
+    //! Expected ACK format : {"ack": <Number>}
+    //!   where the number is the highest packet index (pi) confirmed received.
     function onReceive(msg as Communications.PhoneAppMessage) as Void {
-        // Protocol does not require ACKs at present; just log receipt.
         var data = msg.data;
-        System.println("CommManager: received from phone: " + (data != null ? data.toString() : "null"));
+        if (data == null) { return; }
+
+        // ── ACK handling ──────────────────────────────────────────
+        if (data instanceof Dictionary) {
+            var ack = (data as Dictionary).get("ack");
+            if (ack != null && _persistentQueue != null) {
+                (_persistentQueue as PersistentQueue).ackUpTo(ack as Number);
+                return;  // ACK message processed — nothing else to log
+            }
+        }
+
+        // ── Other messages (commands, debug) ──────────────────────
+        System.println("CommManager: received: " + data.toString());
     }
 
-    //! @return true if the last transmit succeeded
-    function isConnected() as Boolean {
-        return _isConnected;
-    }
+    // ── Accessors ─────────────────────────────────────────────────
 
-    function getPacketsSent() as Number {
-        return _packetsSent;
-    }
+    function isConnected()     as Boolean { return _isConnected;    }
+    function getQueueSize()    as Number  { return _queue.size();   }
+    function getPacketsSent()  as Number  { return _packetsSent;    }
+    function getSendFailures() as Number  { return _sendFailures;   }
 
-    function getSendFailures() as Number {
-        return _sendFailures;
-    }
-
-    function getQueueSize() as Number {
-        return _queue.size();
-    }
-
-    //! Return a link-stats snapshot for UI display.
-    //! @return Dictionary with keys: isLinked, packetsSent, sendFailures, queueSize
     function getLinkStats() as Dictionary {
+        var pqSize = (_persistentQueue != null)
+            ? (_persistentQueue as PersistentQueue).size()
+            : 0;
         return {
-            "isLinked"     => _isConnected,
-            "packetsSent"  => _packetsSent,
-            "sendFailures" => _sendFailures,
-            "queueSize"    => _queue.size()
+            "isLinked"      => _isConnected,
+            "packetsSent"   => _packetsSent,
+            "sendFailures"  => _sendFailures,
+            "queueSize"     => _queue.size(),
+            "persistentSize"=> pqSize
         };
     }
 
-    //! Inner listener class bound to this CommunicationManager.
+    // ── Inner listener ────────────────────────────────────────────
+
     class CommListener extends Communications.ConnectionListener {
 
         private var _owner as CommunicationManager;
@@ -189,14 +259,12 @@ class CommunicationManager {
             _owner = owner;
         }
 
-        //! Transmit completed successfully.
         function onComplete() as Void {
-            _owner._handleSuccess();
+            _owner._onTransmitOk();
         }
 
-        //! Transmit failed.
         function onError() as Void {
-            _owner._handleFailure();
+            _owner._onTransmitFailed();
         }
     }
 }

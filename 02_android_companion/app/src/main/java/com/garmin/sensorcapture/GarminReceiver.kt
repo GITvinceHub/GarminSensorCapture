@@ -16,12 +16,17 @@ private const val TAG = "GarminReceiver"
  * Implements IQApplicationEventListener to receive raw messages,
  * parses them as GarminPacket, validates them, and dispatches
  * to FileLogger and ViewModel.
+ *
+ * ACK flow: after each valid DATA packet, [onSendAck] is invoked with the
+ * packet index so MainActivity can relay {"ack": N} back to the watch.
+ * Header/footer packets are logged but not ACK-ed (they have no samples).
  */
 class GarminReceiver(
     private val fileLogger: FileLogger,
     private val sessionManager: SessionManager,
     private val onPacketReceived: (GarminPacket) -> Unit,
-    private val onError: (String) -> Unit
+    private val onError: (String) -> Unit,
+    private val onSendAck: ((Long) -> Unit)? = null
 ) : ConnectIQ.IQApplicationEventListener {
 
     private val gson = Gson()
@@ -54,6 +59,23 @@ class GarminReceiver(
      * @param status       Message status
      */
     override fun onMessageReceived(
+        device: IQDevice?,
+        app: IQApp?,
+        messageData: MutableList<Any>?,
+        status: ConnectIQ.IQMessageStatus?
+    ) {
+        // Outer guard: never let an exception propagate to the ConnectIQ SDK callback,
+        // as that would crash the entire Android app.
+        try {
+            _processMessage(device, app, messageData, status)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unhandled exception in onMessageReceived: ${e.message}", e)
+            invalidPacketsCount++
+            onError("Internal error: ${e.message?.take(120)}")
+        }
+    }
+
+    private fun _processMessage(
         device: IQDevice?,
         app: IQApp?,
         messageData: MutableList<Any>?,
@@ -96,8 +118,10 @@ class GarminReceiver(
             return
         }
 
-        // Detect gaps in packet sequence
-        detectGaps(packet.packetIndex)
+        // Detect sequence gaps only for data packets (meta packets may share pi=0)
+        if (!packet.isMetaPacket) {
+            detectGaps(packet.packetIndex)
+        }
 
         // Log to file
         try {
@@ -107,16 +131,21 @@ class GarminReceiver(
             onError("File write error: ${e.message}")
         }
 
-        // Update session counter
+        // Update session counter and stats
         sessionManager.onPacketReceived()
-
         validPacketsCount++
-        lastPacketIndex = packet.packetIndex
+        if (!packet.isMetaPacket) {
+            lastPacketIndex = packet.packetIndex
+            // Send ACK so the watch can free the persistent queue entry
+            onSendAck?.invoke(packet.packetIndex)
+        }
 
         // Dispatch to UI
         onPacketReceived(packet)
 
-        Log.v(TAG, "Packet #${packet.packetIndex} received: ${packet.samples.size} samples")
+        val sampleCount = packet.samples?.size ?: 0
+        val typeLabel   = if (packet.isMetaPacket) "[${packet.packetType}]" else "data"
+        Log.v(TAG, "Packet #${packet.packetIndex} ($typeLabel): $sampleCount samples")
     }
 
     /**
@@ -163,8 +192,9 @@ class GarminReceiver(
             // Attempt best-effort parsing anyway
         }
 
-        if (packet.sessionId.isBlank()) {
-            Log.w(TAG, "Packet has blank sessionId")
+        // sessionId is nullable because Gson can set it to null when absent.
+        if (packet.sessionId.isNullOrBlank()) {
+            Log.w(TAG, "Packet has null or blank sessionId")
             return false
         }
 
@@ -173,13 +203,14 @@ class GarminReceiver(
             return false
         }
 
-        if (packet.samples.isEmpty() && !packet.isPartial) {
-            Log.w(TAG, "Packet has empty samples but no PARTIAL flag")
+        // Meta packets (header/footer) legitimately have no samples — skip this check.
+        if (!packet.isMetaPacket && packet.samplesOrEmpty.isEmpty() && !packet.isPartial) {
+            Log.w(TAG, "Data packet has empty samples but no PARTIAL flag")
             // Not a hard failure — could be a keep-alive
         }
 
         if (packet.gps != null && !packet.gps.isValid) {
-            Log.w(TAG, "Packet has invalid GPS coordinates: lat=${packet.gps.lat} lon=${packet.gps.lon}")
+            Log.w(TAG, "Packet has invalid GPS: lat=${packet.gps.lat} lon=${packet.gps.lon}")
             // Not a hard failure — just a warning
         }
 

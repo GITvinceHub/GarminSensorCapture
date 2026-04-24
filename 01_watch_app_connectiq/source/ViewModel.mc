@@ -78,6 +78,76 @@ class ViewModel {
         return (imu * 40 + gps * 30 + ble * 20 + hr * 10) / 100;
     }
 
+    //! Buffer quality: based on dropped samples and in-memory queue saturation.
+    //! 100 = no drops, no saturation; degrades with each dropped sample or full queue.
+    function computeBufferQuality(status as Dictionary) as Number {
+        var q = 100;
+        var dropped = status.get("droppedSamples");
+        if (dropped != null && (dropped as Number) > 0) {
+            var penalty = (dropped as Number) * 2;
+            if (penalty > 50) { penalty = 50; }
+            q -= penalty;
+        }
+        var queueSz = status.get("commQueueSize");
+        if (queueSz != null) {
+            var sz = queueSz as Number;
+            if (sz >= 15) { q -= 30; }
+            else if (sz >= 10) { q -= 15; }
+            else if (sz >= 5)  { q -= 5; }
+        }
+        if (q < 0) { q = 0; }
+        return q;
+    }
+
+    //! Integrity quality: based on error count, dropped samples, send failures.
+    //! 100 = no errors; penalises by type.
+    function computeIntegrityQuality(status as Dictionary) as Number {
+        var q = 100;
+        var errCount = status.get("errorCount");
+        if (errCount != null) {
+            var penalty = (errCount as Number) * 5;
+            if (penalty > 40) { penalty = 40; }
+            q -= penalty;
+        }
+        var dropped = status.get("droppedSamples");
+        if (dropped != null) {
+            var penalty2 = (dropped as Number) * 3;
+            if (penalty2 > 30) { penalty2 = 30; }
+            q -= penalty2;
+        }
+        var failures = status.get("commSendFailures");
+        if (failures != null) {
+            var penalty3 = (failures as Number) * 2;
+            if (penalty3 > 20) { penalty3 = 20; }
+            q -= penalty3;
+        }
+        if (q < 0) { q = 0; }
+        return q;
+    }
+
+    //! Power quality: based on battery percentage.
+    //! 100 = >50%, 75 = 25-50%, 50 = 10-25%, 20 = <10%.
+    function computePowerQuality(status as Dictionary) as Number {
+        var bat = status.get("battery");
+        if (bat == null) { return 75; }
+        var pct = bat as Number;
+        if (pct > 50) { return 100; }
+        if (pct > 25) { return 75; }
+        if (pct > 10) { return 50; }
+        return 20;
+    }
+
+    //! Pipeline quality: composite of all subsystems.
+    //! 30 % IMU + 25 % BLE + 20 % integrity + 15 % GPS + 10 % power.
+    function computePipelineQuality(status as Dictionary) as Number {
+        var imu  = computeImuQuality(status);
+        var ble  = computeBleQuality(status);
+        var intg = computeIntegrityQuality(status);
+        var gps  = computeGpsQuality(status);
+        var pwr  = computePowerQuality(status);
+        return (imu * 30 + ble * 25 + intg * 20 + gps * 15 + pwr * 10) / 100;
+    }
+
     //! Return the appropriate colour for a quality value.
     function qualityColor(q as Number) as Number {
         if (q >= Q_WARN)  { return Graphics.COLOR_GREEN; }

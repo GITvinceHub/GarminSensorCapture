@@ -133,10 +133,11 @@ class FileLogger(private val context: Context) {
             "received_at" to receivedAt,
             "session_id"  to sessionId,
             "pv"          to packet.protocolVersion,
+            "pt"          to packet.packetType,       // "header" | "footer" | null
             "sid"         to packet.sessionId,
             "pi"          to packet.packetIndex,
             "dtr"         to packet.deviceTimeReference,
-            "s"           to packet.samples,
+            "s"           to packet.samplesOrEmpty,   // never null in JSONL output
             "gps"         to packet.gps,
             "meta"        to packet.meta,
             "ef"          to packet.errorFlags
