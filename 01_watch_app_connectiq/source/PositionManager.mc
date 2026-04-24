@@ -1,191 +1,80 @@
-import Toybox.Position;
-import Toybox.Lang;
-import Toybox.System;
-import Toybox.Math;
-import Toybox.Time;
-
-//! Manages GPS position data.
-//! Uses Toybox.Position with LOCATION_CONTINUOUS for ~1Hz updates.
+//! PositionManager.mc
+//! GPS 1 Hz — enables Position, caches the last fix, exposes a dict the serializer reads.
 //!
-//! HYPOTHESIS H-003: GPS at 1 Hz via LOCATION_CONTINUOUS
-//! Note: lat/lon from Position.Info are in radians → converted to degrees here.
+//! FR-006: lat, lon, alt, spd, hdg at ~1 Hz.
+//! Callback is try/catch wrapped (NFR-012).
+using Toybox.Position;
+using Toybox.Lang;
+using Toybox.System;
+using Toybox.Time;
+
 class PositionManager {
 
-    //! Callback type: called when a new GPS fix is available
-    typedef GpsCallback as Method(gpsData as Dictionary) as Void;
+    private var _enabled;
+    private var _lastFix;       // Dictionary or null
+    private var _errorCount;
 
-    //! Conversion constant: radians to degrees
-    private const RAD_TO_DEG = 57.29577951308232f;
-
-    //! Maximum age of a GPS fix before it is considered stale (ms)
-    private const MAX_FIX_AGE_MS = 5000;
-
-    //! Callback to notify SessionManager
-    private var _callback as GpsCallback;
-
-    //! Last valid GPS fix data dictionary
-    private var _lastFix as Dictionary or Null;
-
-    //! Timestamp when the last fix was received (System.getTimer())
-    private var _lastFixTime as Number;
-
-    //! Whether position events are currently enabled
-    private var _isEnabled as Boolean;
-
-    //! Whether the last fix was valid (quality check)
-    private var _hasValidFix as Boolean;
-
-    //! @param callback Function called on each new GPS fix
-    function initialize(callback as GpsCallback) {
-        _callback      = callback;
-        _lastFix       = null;
-        _lastFixTime   = 0;
-        _isEnabled     = false;
-        _hasValidFix   = false;
+    function initialize() {
+        _enabled = false;
+        _lastFix = null;
+        _errorCount = 0;
     }
 
-    //! Enable continuous location events. Called when session starts.
-    function enable() as Void {
-        if (_isEnabled) {
-            return;
+    function enable() {
+        if (_enabled) { return; }
+        try {
+            Position.enableLocationEvents(
+                Position.LOCATION_CONTINUOUS,
+                method(:onPosition)
+            );
+            _enabled = true;
+            System.println("PositionManager: enabled");
+        } catch (ex instanceof Lang.Exception) {
+            System.println("PositionManager: enable FAILED " + ex.getErrorMessage());
+            _enabled = false;
+            _errorCount += 1;
         }
-        Position.enableLocationEvents(
-            Position.LOCATION_CONTINUOUS,
-            method(:onPosition)
-        );
-        _isEnabled = true;
-        System.println("PositionManager: enabled");
     }
 
-    //! Disable location events. Called when session stops.
-    function disable() as Void {
-        if (!_isEnabled) {
-            return;
+    function disable() {
+        if (!_enabled) { return; }
+        try {
+            Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
+        } catch (ex instanceof Lang.Exception) {
+            System.println("PositionManager: disable err " + ex.getErrorMessage());
         }
-        Position.enableLocationEvents(Position.LOCATION_DISABLE, null);
-        _isEnabled   = false;
-        _hasValidFix = false;
-        System.println("PositionManager: disabled");
+        _enabled = false;
     }
 
-    //! GPS callback — called by Connect IQ runtime on each new position.
-    //! @param info Position.Info object with GPS data
+    //! CIQ callback — keep it small.
     function onPosition(info as Position.Info) as Void {
-        // Check fix quality
-        if (info == null || info.accuracy == Position.QUALITY_NOT_AVAILABLE) {
-            _hasValidFix = false;
-            return;
+        try {
+            if (info == null) { return; }
+            var loc = info.position;
+            if (loc == null) { return; }
+
+            var degs = loc.toDegrees();
+            var fix = {
+                "lat" => degs[0],
+                "lon" => degs[1],
+                "alt" => info.altitude != null ? info.altitude : 0.0,
+                "spd" => info.speed != null ? info.speed : 0.0,
+                "hdg" => info.heading != null ? info.heading : 0.0,
+                "acc" => info.accuracy != null ? info.accuracy : 0,
+                "ts"  => Time.now().value()
+            };
+            _lastFix = fix;
+        } catch (ex instanceof Lang.Exception) {
+            System.println("PositionManager: onPosition FATAL " + ex.getErrorMessage());
+            _errorCount += 1;
         }
-
-        // Accept POOR quality or better (QUALITY_POOR = 1, QUALITY_USABLE = 2, QUALITY_GOOD = 3)
-        if (info.accuracy < Position.QUALITY_POOR) {
-            _hasValidFix = false;
-            return;
-        }
-
-        _hasValidFix = true;
-        _lastFixTime = System.getTimer();
-
-        // ── Convert lat/lon from radians to degrees ───────────────
-        var posArray = info.position.toRadians();
-        var latDeg = posArray[0].toFloat() * RAD_TO_DEG;
-        var lonDeg = posArray[1].toFloat() * RAD_TO_DEG;
-
-        // ── Extract optional fields ───────────────────────────────
-        var altM  = 0.0f;
-        var spdMs = 0.0f;
-        var hdgDeg = 0.0f;
-        var accM  = 0.0f;
-
-        if (info has :altitude && info.altitude != null) {
-            altM = info.altitude.toFloat();
-        }
-        if (info has :speed && info.speed != null) {
-            spdMs = info.speed.toFloat();
-        }
-        if (info has :heading && info.heading != null) {
-            hdgDeg = info.heading.toFloat();
-        }
-        // Horizontal accuracy from quality enum (approximate mapping)
-        accM = _mapQualityToAccuracy(info.accuracy);
-
-        // ── Get GPS timestamp (Unix epoch seconds) ────────────────
-        var tsUnix = 0l;
-        if (info has :when && info.when != null) {
-            tsUnix = info.when.value();
-        } else {
-            // Fallback: use system time
-            tsUnix = Time.now().value();
-        }
-
-        // ── Build GPS data dictionary ─────────────────────────────
-        _lastFix = {
-            "lat" => latDeg,
-            "lon" => lonDeg,
-            "alt" => altM,
-            "spd" => spdMs,
-            "hdg" => hdgDeg,
-            "acc" => accM,
-            "ts"  => tsUnix
-        };
-
-        // Notify callback
-        _callback.invoke(_lastFix as Dictionary);
     }
 
-    //! Get the last valid GPS fix.
-    //! @return Dictionary with GPS data, or null if no valid fix
-    function getLastFix() as Dictionary or Null {
-        if (!_hasValidFix || _lastFix == null) {
-            return null;
-        }
-
-        // Check staleness
-        var age = System.getTimer() - _lastFixTime;
-        if (age > MAX_FIX_AGE_MS) {
-            _hasValidFix = false;
-            return null;
-        }
-
+    //! Returns the cached fix (may be null if no fix yet). Safe to read from any thread.
+    function getLastFix() {
         return _lastFix;
     }
 
-    //! Check if a valid (non-stale) GPS fix is available.
-    //! @return true if valid fix exists
-    function hasValidFix() as Boolean {
-        if (!_hasValidFix) {
-            return false;
-        }
-        var age = System.getTimer() - _lastFixTime;
-        return age <= MAX_FIX_AGE_MS;
-    }
-
-    //! Get age of last fix in milliseconds.
-    //! @return Age in ms, or -1 if no fix
-    function getFixAgeMs() as Number {
-        if (_lastFixTime == 0) {
-            return -1;
-        }
-        return System.getTimer() - _lastFixTime;
-    }
-
-    //! Map Position quality enum to approximate horizontal accuracy in meters.
-    //! @param quality Position.QUALITY_* constant
-    //! @return Approximate accuracy in meters
-    private function _mapQualityToAccuracy(quality as Number) as Float {
-        if (quality == Position.QUALITY_GOOD) {
-            return 5.0f;
-        } else if (quality == Position.QUALITY_USABLE) {
-            return 15.0f;
-        } else if (quality == Position.QUALITY_POOR) {
-            return 50.0f;
-        }
-        return 100.0f;
-    }
-
-    //! Check if position tracking is currently active.
-    //! @return true if enabled
-    function isEnabled() as Boolean {
-        return _isEnabled;
-    }
+    function isEnabled() { return _enabled; }
+    function getErrorCount() { return _errorCount; }
 }

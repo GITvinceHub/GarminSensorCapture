@@ -1,37 +1,52 @@
-import Toybox.Application;
-import Toybox.Lang;
-import Toybox.WatchUi;
+//! GarminSensorApp.mc
+//! Application entry point.
+//! Responsibility: instantiate SessionManager, provide initial view/delegate.
+//! Keep this file tiny — delegates all behaviour to SessionManager.
+using Toybox.Application;
+using Toybox.WatchUi;
+using Toybox.System;
+using Toybox.Lang;
 
-//! Main application entry point for GarminSensorCapture.
-//! Manages the lifecycle of the sensor capture session.
 class GarminSensorApp extends Application.AppBase {
 
-    //! Reference to the session manager (owns all subsystems)
-    private var _sessionManager as SessionManager;
+    //! Shared reference so MainView / MainDelegate can reach the session.
+    public var sessionManager;
 
-    //! Constructor — called once when the app starts
     function initialize() {
         AppBase.initialize();
-        _sessionManager = new SessionManager();
+        sessionManager = null;
     }
 
-    //! Called when the app becomes active (foreground)
-    //! @param state Optional state dictionary from previous invocation
-    function onStart(state as Dictionary?) as Void {
-        _sessionManager.setup();
+    //! onStart is invoked when the app starts up.
+    function onStart(state) {
+        try {
+            sessionManager = new SessionManager();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onStart FATAL " + ex.getErrorMessage());
+        }
     }
 
-    //! Called when the app is being stopped (exit or background)
-    //! @param state Optional state dictionary to persist
-    function onStop(state as Dictionary?) as Void {
-        _sessionManager.cleanup();
+    //! onStop is invoked when the app exits. Make sure any active session is closed.
+    function onStop(state) {
+        try {
+            if (sessionManager != null) {
+                sessionManager.shutdown();
+                sessionManager = null;
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onStop FATAL " + ex.getErrorMessage());
+        }
     }
 
-    //! Return the initial view and delegate pair
-    //! @return Array of [View, InputDelegate]
-    function getInitialView() as [WatchUi.Views] or [WatchUi.Views, WatchUi.InputDelegates] {
-        var view = new MainView(_sessionManager);
-        var delegate = new MainDelegate(_sessionManager);
+    //! Return the initial view + delegate pair to the CIQ runtime.
+    function getInitialView() {
+        var view = new MainView(sessionManager);
+        var delegate = new MainDelegate(sessionManager, view);
         return [view, delegate];
+    }
+
+    //! Global accessor used by other modules to reach the app instance.
+    static function getApp() {
+        return Application.getApp();
     }
 }

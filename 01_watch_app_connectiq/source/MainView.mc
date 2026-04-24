@@ -1,146 +1,130 @@
-import Toybox.WatchUi;
-import Toybox.Graphics;
-import Toybox.Lang;
-import Toybox.System;
+//! MainView.mc
+//! Single KISS status screen (spec §3 rewrite: no 14-screen UI).
+//! Shows: state, packets, GPS, BLE, errors, battery.
+//! Auto-refreshes at 2 Hz when recording (FR-029).
+using Toybox.WatchUi;
+using Toybox.Graphics;
+using Toybox.System;
+using Toybox.Timer;
+using Toybox.Lang;
 
-//! Main view for GarminSensorCapture.
-//! Displays: recording status, packet count, GPS fix, BLE link, errors.
 class MainView extends WatchUi.View {
 
-    //! Reference to session manager for reading state
-    private var _sessionManager as SessionManager;
+    public static const REFRESH_INTERVAL_MS = 500;   // FR-029: 2 Hz
 
-    //! Cache for loaded string resources
-    private var _strIdle as String;
-    private var _strRecording as String;
-    private var _strStopping as String;
-    private var _strPackets as String;
-    private var _strGps as String;
-    private var _strLink as String;
-    private var _strError as String;
-    private var _strGpsFix as String;
-    private var _strGpsNoFix as String;
-    private var _strConnected as String;
-    private var _strDisconnected as String;
+    private var _session;
+    private var _refreshTimer;
 
-    //! @param sessionManager Shared session manager instance
-    function initialize(sessionManager as SessionManager) {
+    function initialize(sessionManager) {
         View.initialize();
-        _sessionManager = sessionManager;
-
-        // Pre-load string resources to avoid repeated lookup
-        _strIdle        = WatchUi.loadResource(Rez.Strings.status_idle) as String;
-        _strRecording   = WatchUi.loadResource(Rez.Strings.status_recording) as String;
-        _strStopping    = WatchUi.loadResource(Rez.Strings.status_stopping) as String;
-        _strPackets     = WatchUi.loadResource(Rez.Strings.label_packets) as String;
-        _strGps         = WatchUi.loadResource(Rez.Strings.label_gps) as String;
-        _strLink        = WatchUi.loadResource(Rez.Strings.label_link) as String;
-        _strError       = WatchUi.loadResource(Rez.Strings.label_error) as String;
-        _strGpsFix      = WatchUi.loadResource(Rez.Strings.gps_fix) as String;
-        _strGpsNoFix    = WatchUi.loadResource(Rez.Strings.gps_nofix) as String;
-        _strConnected   = WatchUi.loadResource(Rez.Strings.link_connected) as String;
-        _strDisconnected = WatchUi.loadResource(Rez.Strings.link_disconnected) as String;
+        _session = sessionManager;
+        _refreshTimer = new Timer.Timer();
     }
 
-    //! Called when the view needs to be laid out before first draw
-    //! @param dc Device context used for dimension queries
-    function onLayout(dc as Graphics.Dc) as Void {
-        // No XML layout used — we draw everything programmatically
+    function onLayout(dc) {
+        // No layout resources — we draw everything in onUpdate.
     }
 
-    //! Called each time the view needs to be redrawn
-    //! @param dc Device context for drawing operations
-    function onUpdate(dc as Graphics.Dc) as Void {
-        // Clear background
-        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_BLACK);
-        dc.clear();
-
-        var width  = dc.getWidth();
-        var height = dc.getHeight();
-        var cx     = width / 2;
-
-        // Retrieve current status snapshot
-        var status = _sessionManager.getStatus();
-
-        // ── Title bar ─────────────────────────────────────────────
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx, 10, Graphics.FONT_TINY,
-                    "SENSOR CAPTURE", Graphics.TEXT_JUSTIFY_CENTER);
-
-        // ── Status (IDLE / RECORDING / STOPPING) ─────────────────
-        var stateStr = _strIdle;
-        var stateColor = Graphics.COLOR_LT_GRAY;
-
-        var state = status.get("state") as Number;
-        if (state == SessionManager.STATE_RECORDING) {
-            stateStr  = _strRecording;
-            stateColor = Graphics.COLOR_GREEN;
-        } else if (state == SessionManager.STATE_STOPPING) {
-            stateStr  = _strStopping;
-            stateColor = Graphics.COLOR_YELLOW;
+    function onShow() {
+        try {
+            _refreshTimer.start(method(:_onRefresh), REFRESH_INTERVAL_MS, true);
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: onShow err " + ex.getErrorMessage());
         }
+    }
 
-        dc.setColor(stateColor, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx, height / 2 - 45, Graphics.FONT_MEDIUM,
-                    stateStr, Graphics.TEXT_JUSTIFY_CENTER);
-
-        // ── Packet counter ────────────────────────────────────────
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        var packetCount = status.get("packetCount") as Number;
-        dc.drawText(cx, height / 2 - 15, Graphics.FONT_SMALL,
-                    _strPackets + " " + packetCount.toString(),
-                    Graphics.TEXT_JUSTIFY_CENTER);
-
-        // ── GPS status ────────────────────────────────────────────
-        var hasGps = status.get("hasGpsFix") as Boolean;
-        var gpsStr = hasGps ? _strGpsFix : _strGpsNoFix;
-        var gpsColor = hasGps ? Graphics.COLOR_GREEN : Graphics.COLOR_RED;
-
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx - 40, height / 2 + 10, Graphics.FONT_TINY,
-                    _strGps, Graphics.TEXT_JUSTIFY_RIGHT);
-        dc.setColor(gpsColor, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx - 35, height / 2 + 10, Graphics.FONT_TINY,
-                    gpsStr, Graphics.TEXT_JUSTIFY_LEFT);
-
-        // ── BLE link status ───────────────────────────────────────
-        var isLinked = status.get("isLinked") as Boolean;
-        var linkStr = isLinked ? _strConnected : _strDisconnected;
-        var linkColor = isLinked ? Graphics.COLOR_BLUE : Graphics.COLOR_RED;
-
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx - 40, height / 2 + 30, Graphics.FONT_TINY,
-                    _strLink, Graphics.TEXT_JUSTIFY_RIGHT);
-        dc.setColor(linkColor, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx - 35, height / 2 + 30, Graphics.FONT_TINY,
-                    linkStr, Graphics.TEXT_JUSTIFY_LEFT);
-
-        // ── Error count ───────────────────────────────────────────
-        var errorCount = status.get("errorCount") as Number;
-        if (errorCount > 0) {
-            dc.setColor(Graphics.COLOR_ORANGE, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(cx, height / 2 + 55, Graphics.FONT_TINY,
-                        _strError + " " + errorCount.toString(),
-                        Graphics.TEXT_JUSTIFY_CENTER);
+    function onHide() {
+        try {
+            _refreshTimer.stop();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: onHide err " + ex.getErrorMessage());
         }
+    }
 
-        // ── Battery indicator (small, bottom right) ───────────────
-        var battery = System.getSystemStats().battery;
-        var batColor = (battery < 20) ? Graphics.COLOR_RED : Graphics.COLOR_LT_GRAY;
-        dc.setColor(batColor, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(width - 5, height - 20, Graphics.FONT_XTINY,
-                    battery.format("%d") + "%",
-                    Graphics.TEXT_JUSTIFY_RIGHT);
+    function _onRefresh() {
+        try {
+            WatchUi.requestUpdate();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: _onRefresh err " + ex.getErrorMessage());
+        }
+    }
 
-        // ── Hint: press START ─────────────────────────────────────
-        if (state == SessionManager.STATE_IDLE) {
+    function onUpdate(dc) {
+        try {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_BLACK);
+            dc.clear();
+
+            var w = dc.getWidth();
+            var h = dc.getHeight();
+            var cx = w / 2;
+
+            var state = (_session != null) ? _session.getState() : SessionManager.STATE_IDLE;
+            var stateStr;
+            var stateColor;
+            if (state == SessionManager.STATE_RECORDING) {
+                stateStr = "RECORDING";
+                stateColor = Graphics.COLOR_RED;
+            } else if (state == SessionManager.STATE_STOPPING) {
+                stateStr = "STOPPING";
+                stateColor = Graphics.COLOR_ORANGE;
+            } else {
+                stateStr = "READY";
+                stateColor = Graphics.COLOR_GREEN;
+            }
+
+            // Row 1: state.
+            dc.setColor(stateColor, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cx, (h * 0.10).toNumber(), Graphics.FONT_MEDIUM, stateStr, Graphics.TEXT_JUSTIFY_CENTER);
+
+            if (_session == null) {
+                return;
+            }
+
+            // Row 2: elapsed time.
+            var elapsed = _session.getElapsedSec();
+            var hrs = elapsed / 3600;
+            var mins = (elapsed / 60) % 60;
+            var secs = elapsed % 60;
+            var timeStr = hrs.format("%02d") + ":" + mins.format("%02d") + ":" + secs.format("%02d");
+            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cx, (h * 0.22).toNumber(), Graphics.FONT_LARGE, timeStr, Graphics.TEXT_JUSTIFY_CENTER);
+
+            // Row 3: packets sent / failed / queue.
+            var pSent = _session.getPacketsSent();
+            var pFail = _session.getPacketsFailed();
+            var qSize = _session.getQueueSize();
+            var bufSize = _session.getBufferSize();
+            var pktStr = "PKT " + pSent + "/" + pFail + "  Q" + qSize + " B" + bufSize;
+            dc.drawText(cx, (h * 0.38).toNumber(), Graphics.FONT_XTINY, pktStr, Graphics.TEXT_JUSTIFY_CENTER);
+
+            // Row 4: BLE / GPS indicators.
+            var bleStr = _session.isLinkUp() ? "BLE OK" : "BLE X";
+            var gpsStr = _session.hasGpsFix() ? "GPS FIX" : "GPS --";
+            dc.setColor(_session.isLinkUp() ? Graphics.COLOR_GREEN : Graphics.COLOR_RED, Graphics.COLOR_TRANSPARENT);
+            dc.drawText((w * 0.30).toNumber(), (h * 0.52).toNumber(), Graphics.FONT_XTINY, bleStr, Graphics.TEXT_JUSTIFY_CENTER);
+            dc.setColor(_session.hasGpsFix() ? Graphics.COLOR_GREEN : Graphics.COLOR_YELLOW, Graphics.COLOR_TRANSPARENT);
+            dc.drawText((w * 0.70).toNumber(), (h * 0.52).toNumber(), Graphics.FONT_XTINY, gpsStr, Graphics.TEXT_JUSTIFY_CENTER);
+
+            // Row 5: HR + battery.
+            dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_TRANSPARENT);
+            var hr = _session.getLastHrBpm();
+            var bat = _session.getBattery();
+            var hrBatStr = "HR " + hr + "   BAT " + bat + "%";
+            dc.drawText(cx, (h * 0.64).toNumber(), Graphics.FONT_XTINY, hrBatStr, Graphics.TEXT_JUSTIFY_CENTER);
+
+            // Row 6: errors (only if any).
+            var errCount = _session.getErrorCount();
+            if (errCount > 0) {
+                dc.setColor(Graphics.COLOR_ORANGE, Graphics.COLOR_TRANSPARENT);
+                dc.drawText(cx, (h * 0.76).toNumber(), Graphics.FONT_XTINY, "ERR " + errCount, Graphics.TEXT_JUSTIFY_CENTER);
+            }
+
+            // Row 7: hint.
             dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(cx, height - 25, Graphics.FONT_XTINY,
-                        "PRESS START", Graphics.TEXT_JUSTIFY_CENTER);
-        } else if (state == SessionManager.STATE_RECORDING) {
-            dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(cx, height - 25, Graphics.FONT_XTINY,
-                        "PRESS BACK TO STOP", Graphics.TEXT_JUSTIFY_CENTER);
+            var hint = (state == SessionManager.STATE_IDLE) ? "START to record" : "START to stop";
+            dc.drawText(cx, (h * 0.88).toNumber(), Graphics.FONT_XTINY, hint, Graphics.TEXT_JUSTIFY_CENTER);
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: onUpdate FATAL " + ex.getErrorMessage());
         }
     }
 }

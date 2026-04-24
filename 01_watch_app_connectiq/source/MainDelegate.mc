@@ -1,113 +1,64 @@
-import Toybox.WatchUi;
-import Toybox.Lang;
-import Toybox.System;
+//! MainDelegate.mc
+//! Minimal button mapping — KISS:
+//!   START  → toggle session
+//!   BACK   → exit app (standard CIQ back-out behaviour)
+//!   UP/DOWN unused for now
+using Toybox.WatchUi;
+using Toybox.System;
+using Toybox.Lang;
 
-//! Input delegate for the main view.
-//! Handles START/STOP session button and long-press event marking.
-class MainDelegate extends WatchUi.InputDelegate {
+class MainDelegate extends WatchUi.BehaviorDelegate {
 
-    //! Reference to session manager
-    private var _sessionManager as SessionManager;
+    private var _session;
+    private var _view;
 
-    //! Timestamp of last key press (for long-press detection)
-    private var _lastKeyPressTime as Number;
-
-    //! Long press threshold in milliseconds
-    private const LONG_PRESS_THRESHOLD_MS = 1000;
-
-    //! @param sessionManager Shared session manager instance
-    function initialize(sessionManager as SessionManager) {
-        InputDelegate.initialize();
-        _sessionManager = sessionManager;
-        _lastKeyPressTime = 0;
+    function initialize(sessionManager, view) {
+        BehaviorDelegate.initialize();
+        _session = sessionManager;
+        _view = view;
     }
 
-    //! Called when a key is pressed (button down)
-    //! @param keyEvent The key event containing key code
-    //! @return true if handled, false to propagate
-    function onKey(keyEvent as WatchUi.KeyEvent) as Boolean {
-        var key = keyEvent.getKey();
-
-        // Record press timestamp for long-press detection
-        _lastKeyPressTime = System.getTimer();
-
-        return false;  // Let onKeyReleased handle the action
-    }
-
-    //! Called when a key is released (button up)
-    //! @param keyEvent The key event containing key code
-    //! @return true if handled, false to propagate
-    function onKeyReleased(keyEvent as WatchUi.KeyEvent) as Boolean {
-        var key = keyEvent.getKey();
-
-        // Calculate hold duration
-        var holdDuration = System.getTimer() - _lastKeyPressTime;
-
-        // START button: toggle session
-        if (key == WatchUi.KEY_START) {
-            if (holdDuration >= LONG_PRESS_THRESHOLD_MS) {
-                // Long press on START: mark an event
-                _handleMarkEvent();
-            } else {
-                // Short press: start or stop
-                _handleStartStop();
-            }
-            WatchUi.requestUpdate();
-            return true;
-        }
-
-        // ENTER / LAP button: also toggles session (short press)
-        if (key == WatchUi.KEY_ENTER) {
-            if (holdDuration < LONG_PRESS_THRESHOLD_MS) {
-                _handleStartStop();
-            }
-            WatchUi.requestUpdate();
-            return true;
-        }
-
-        // BACK / DOWN during recording: stop
-        if (key == WatchUi.KEY_DOWN || key == WatchUi.KEY_ESC) {
-            var state = _sessionManager.getState();
-            if (state == SessionManager.STATE_RECORDING) {
-                _sessionManager.stopSession();
+    //! CIQ shortcut for the START button (also mapped on fēnix).
+    function onSelect() {
+        try {
+            if (_session != null) {
+                _session.toggleSession();
                 WatchUi.requestUpdate();
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainDelegate: onSelect FATAL " + ex.getErrorMessage());
+        }
+        return true;
+    }
+
+    //! BACK — let the CIQ runtime handle exit (returns false ⇒ default behaviour).
+    function onBack() {
+        try {
+            if (_session != null && _session.getState() != SessionManager.STATE_IDLE) {
+                _session.stopSession();
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainDelegate: onBack FATAL " + ex.getErrorMessage());
+        }
+        return false;   // let system close the app
+    }
+
+    //! Generic key handler — try to catch any KEY_ENTER / KEY_START events not
+    //! already handled by onSelect (depending on device).
+    function onKey(keyEvent) {
+        try {
+            if (keyEvent == null) { return false; }
+            var key = keyEvent.getKey();
+            if (key == WatchUi.KEY_ENTER || key == WatchUi.KEY_START) {
+                if (_session != null) {
+                    _session.toggleSession();
+                    WatchUi.requestUpdate();
+                }
                 return true;
             }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainDelegate: onKey FATAL " + ex.getErrorMessage());
         }
-
-        return false;
-    }
-
-    //! Toggle start/stop based on current state
-    private function _handleStartStop() as Void {
-        var state = _sessionManager.getState();
-
-        if (state == SessionManager.STATE_IDLE) {
-            _sessionManager.startSession();
-        } else if (state == SessionManager.STATE_RECORDING) {
-            _sessionManager.stopSession();
-        }
-        // If STOPPING, ignore — already in transition
-    }
-
-    //! Mark a session event (lap/waypoint) via long press
-    private function _handleMarkEvent() as Void {
-        if (_sessionManager.getState() == SessionManager.STATE_RECORDING) {
-            _sessionManager.markEvent();
-        }
-    }
-
-    //! Handle swipe gestures (optional)
-    //! @param swipeEvent The swipe event
-    //! @return true if handled
-    function onSwipe(swipeEvent as WatchUi.SwipeEvent) as Boolean {
-        return false;
-    }
-
-    //! Handle tap/touch events (optional, only on touchscreen devices)
-    //! @param clickEvent The click event
-    //! @return true if handled
-    function onTap(clickEvent as WatchUi.ClickEvent) as Boolean {
         return false;
     }
 }
