@@ -1,129 +1,100 @@
 package com.garmin.sensorcapture
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import com.garmin.sensorcapture.models.GarminPacket
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.util.ArrayDeque
 
-/** Immutable UI snapshot surfaced to MainActivity. */
-data class UiState(
-    val sdkStatus: String        = "NOT_INITIALIZED",
-    val watchStatus: String      = "UNKNOWN",
-    val watchId: String          = "-",
-    val packetsReceived: Long    = 0L,
-    val fileSizeBytes: Long      = 0L,
-    val throughputPps: Float     = 0f,
-    val lastError: String?       = null,
-    val sessionActive: Boolean   = false,
-    val sessionId: String?       = null,
-    val packetLossPercent: Float = 0f,
-    val gapsDetected: Int        = 0,
-    val batteryLevel: Int?       = null,
-    val lastGpsFix: Boolean      = false
-)
-
 /**
- * UI state holder for [MainActivity].
+ * Aggregated UI state for MainActivity.
  *
- * Exposes [UiState] via a [StateFlow] and computes a rolling throughput over a
- * 5-second window. All mutation goes through [update] so the flow always emits
- * a fresh immutable snapshot (required for Compose / lifecycleScope collectors).
+ *  - throughputPps: 5-second rolling average, updated on every packet
+ *  - packetLossPercent / gapsDetected: supplied by GarminReceiver
  */
-class MainViewModel : ViewModel() {
+class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val _uiState = MutableStateFlow(UiState())
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    data class UiState(
+        val sdkStatus: String = "NOT_INITIALIZED",
+        val watchStatus: String = "UNKNOWN",
+        val watchId: String? = null,
+        val sessionActive: Boolean = false,
+        val sessionId: String? = null,
+        val packetsReceived: Long = 0L,
+        val fileSizeBytes: Long = 0L,
+        val throughputPps: Double = 0.0,
+        val packetLossPercent: Double = 0.0,
+        val gapsDetected: Long = 0L,
+        val lastError: String? = null
+    )
 
-    /** Timestamps (ms) of the last N packets, for rolling throughput. */
-    private val packetTimestamps = ArrayDeque<Long>()
-    private val throughputWindowMs = 5_000L
+    private val _state = MutableStateFlow(UiState())
+    val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /** Packet-reception timestamps for rolling 5-second throughput. */
+    private val recentReceiveMs = ArrayDeque<Long>()
+    private val rollingWindowMs = 5_000L
 
     fun updateSdkStatus(status: String) {
-        _uiState.update { it.copy(sdkStatus = status) }
+        _state.value = _state.value.copy(sdkStatus = status)
     }
 
-    fun updateWatchStatus(status: String, watchId: String = "-") {
-        _uiState.update { it.copy(watchStatus = status, watchId = watchId) }
+    fun updateWatchStatus(status: String, id: String?) {
+        _state.value = _state.value.copy(watchStatus = status, watchId = id)
     }
 
-    /**
-     * Record a freshly received packet and refresh throughput.
-     */
+    fun updateSessionState(active: Boolean, sessionId: String?) {
+        _state.value = _state.value.copy(sessionActive = active, sessionId = sessionId)
+    }
+
+    /** Reset counters for a fresh session (packetsReceived, throughput, loss, error). */
+    fun resetForNewSession() {
+        synchronized(recentReceiveMs) { recentReceiveMs.clear() }
+        _state.value = _state.value.copy(
+            packetsReceived = 0L,
+            fileSizeBytes = 0L,
+            throughputPps = 0.0,
+            packetLossPercent = 0.0,
+            gapsDetected = 0L,
+            lastError = null
+        )
+    }
+
     fun onPacketReceived(
-        packet: GarminPacket,
+        @Suppress("UNUSED_PARAMETER") packet: GarminPacket,
         fileSizeBytes: Long,
-        lossPercent: Float,
-        gaps: Int
+        lossPercent: Double,
+        gaps: Long
     ) {
         val now = System.currentTimeMillis()
-
-        packetTimestamps.addLast(now)
-        while (packetTimestamps.isNotEmpty() &&
-               now - packetTimestamps.first() > throughputWindowMs) {
-            packetTimestamps.removeFirst()
+        val pps: Double = synchronized(recentReceiveMs) {
+            recentReceiveMs.addLast(now)
+            while (recentReceiveMs.isNotEmpty()) {
+                val head = recentReceiveMs.peekFirst() ?: break
+                if (now - head <= rollingWindowMs) break
+                recentReceiveMs.pollFirst()
+            }
+            val count = recentReceiveMs.size.toDouble()
+            val first: Long = recentReceiveMs.peekFirst() ?: now
+            val spanMs = (now - first).coerceAtLeast(1L)
+            // Effective window: either the full 5s or the span we actually have.
+            val denomMs = minOf(spanMs, rollingWindowMs).toDouble()
+            if (denomMs <= 0.0) 0.0 else count * 1000.0 / denomMs
         }
 
-        val throughput: Float = if (packetTimestamps.size > 1) {
-            val windowMs = (now - packetTimestamps.first()).coerceAtLeast(1L)
-            packetTimestamps.size.toFloat() / (windowMs / 1000f)
-        } else 0f
-
-        val battery = packet.meta?.bat
-        val hasGps  = packet.gps != null && packet.gps.isValid
-
-        _uiState.update { s ->
-            s.copy(
-                packetsReceived   = s.packetsReceived + 1,
-                fileSizeBytes     = fileSizeBytes,
-                throughputPps     = throughput,
-                batteryLevel      = battery ?: s.batteryLevel,
-                lastGpsFix        = hasGps,
-                packetLossPercent = lossPercent,
-                gapsDetected      = gaps,
-                lastError         = null
-            )
-        }
+        val prev = _state.value
+        _state.value = prev.copy(
+            packetsReceived = prev.packetsReceived + 1,
+            fileSizeBytes = fileSizeBytes,
+            throughputPps = pps,
+            packetLossPercent = lossPercent,
+            gapsDetected = gaps
+        )
     }
 
-    fun onError(message: String) {
-        _uiState.update { it.copy(lastError = message) }
-    }
-
-    fun updateSessionState(active: Boolean, sessionId: String? = null) {
-        if (!active) packetTimestamps.clear()
-        _uiState.update { s ->
-            s.copy(
-                sessionActive = active,
-                sessionId     = sessionId ?: s.sessionId,
-                throughputPps = if (!active) 0f else s.throughputPps
-            )
-        }
-    }
-
-    fun resetForNewSession() {
-        packetTimestamps.clear()
-        _uiState.update { s ->
-            s.copy(
-                packetsReceived   = 0L,
-                fileSizeBytes     = 0L,
-                throughputPps     = 0f,
-                lastError         = null,
-                packetLossPercent = 0f,
-                gapsDetected      = 0,
-                lastGpsFix        = false
-            )
-        }
-    }
-
-    fun updateFileSize(bytes: Long) {
-        _uiState.update { it.copy(fileSizeBytes = bytes) }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        packetTimestamps.clear()
+    fun onError(msg: String) {
+        _state.value = _state.value.copy(lastError = msg)
     }
 }

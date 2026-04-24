@@ -3,128 +3,87 @@ package com.garmin.sensorcapture.models
 import com.google.gson.annotations.SerializedName
 
 /**
- * Root packet received from the Garmin watch via Connect IQ channel (protocol v1).
+ * Data model for packets received from the Garmin watch (protocol v1, SPEC §8).
  *
- * Implements contracts C-060..C-061 per SPECIFICATION.md §7.7.
+ * CRITICAL: Every reference-type field MUST be nullable.
+ * This was the root cause of an NPE crash in v1.3.x when a header packet arrived
+ * with no `s` field — Gson default-populated fields but non-null declarations
+ * blew up downstream. The current watch (rewrite branch) emits ONLY simple data
+ * packets (no header, no footer, no `pt`) per protocol v1 §8.1, but we keep the
+ * model future-proof for when header/footer come back (FR-008).
  *
- * See SPECIFICATION.md §8.1 (data packet), §8.2 (header), §8.3 (footer).
- *
- * Nullability discipline (CRITICAL, fixes v1.3.x NPE crash — SC-002):
- * Gson ignores Kotlin's non-null annotations and will set a field to null when the
- * corresponding JSON key is absent. The watch emits header/footer packets WITHOUT
- * the `s` field and data packets MAY omit `sid` in rare edge cases, so every
- * reference-type field that can be absent on the wire MUST be declared nullable
- * here. Use [samplesOrEmpty] / [isMetaPacket] to work with samples safely.
+ * @see SPECIFICATION.md §8 Protocol, §7.7 C-060/C-061, §9 SC-002
  */
 data class GarminPacket(
-    @SerializedName("pv")   val protocolVersion: Int = 1,
-    @SerializedName("sid")  val sessionId: String?        = null,   // nullable: gson sets null if absent
-    @SerializedName("pi")   val packetIndex: Long         = 0L,
-    @SerializedName("dtr")  val deviceTimeReference: Long = 0L,
-    @SerializedName("s")    val samples: List<SensorSample>? = null, // nullable: absent in header/footer (SC-002)
-    @SerializedName("rr")   val rrIntervals: List<Int>?   = null,
-    @SerializedName("gps")  val gps: GpsData?             = null,
-    @SerializedName("meta") val meta: MetaData?           = null,
-    @SerializedName("ef")   val errorFlags: Int           = 0,
-    @SerializedName("pt")   val packetType: String?       = null,   // "header" | "footer" | null (data)
-    @SerializedName("user") val user: Map<String, Any?>?  = null,
-    @SerializedName("device")  val device: Map<String, Any?>? = null,
-    @SerializedName("history") val history: Map<String, Any?>? = null
+    @SerializedName("pv") val protocolVersion: Int? = null,
+    @SerializedName("pt") val packetType: String? = null, // "header" | "footer" | null (data)
+    @SerializedName("sid") val sessionId: String? = null,
+    @SerializedName("pi") val packetIndex: Long? = null,
+    @SerializedName("dtr") val deviceTimeReference: Long? = null, // watch uptime ms, NOT epoch
+    @SerializedName("s") val samples: List<SensorSample>? = null,
+    @SerializedName("rr") val rrIntervals: List<Int>? = null,
+    @SerializedName("gps") val gps: GpsData? = null,
+    @SerializedName("meta") val meta: MetaData? = null,
+    @SerializedName("ef") val errorFlags: Int? = null,
+    @SerializedName("user") val user: Map<String, Any>? = null,
+    @SerializedName("device") val device: Map<String, Any>? = null,
+    @SerializedName("history") val history: Map<String, Any>? = null
 ) {
-    // ── Error flag decoders (§8.6) ────────────────────────────────────
-    /** True if the SENSOR_ERROR bit (0x01) is set. */
-    val hasSensorError: Boolean    get() = errorFlags and 0x01 != 0
-    /** True if the GPS_ERROR bit (0x02) is set. */
-    val hasGpsError: Boolean       get() = errorFlags and 0x02 != 0
-    /** True if the BUFFER_OVERFLOW bit (0x04) is set. */
-    val hasBufferOverflow: Boolean get() = errorFlags and 0x04 != 0
-    /** True if the PARTIAL_PACKET bit (0x08) is set. */
-    val isPartial: Boolean         get() = errorFlags and 0x08 != 0
-    /** True if the CLOCK_SKEW bit (0x10) is set. */
-    val hasClockSkew: Boolean      get() = errorFlags and 0x10 != 0
-    /** True if the COMM_RETRY bit (0x20) is set. */
-    val isRetransmit: Boolean      get() = errorFlags and 0x20 != 0
+    /** True if this is a meta (header/footer) packet — skip samples validation and NEVER ACK. */
+    val isMetaPacket: Boolean
+        get() = !packetType.isNullOrBlank()
 
-    // ── Meta helpers (C-061) ──────────────────────────────────────────
-    /** True if this packet carries session metadata (header or footer), not sensor samples. */
-    val isMetaPacket: Boolean get() = !packetType.isNullOrEmpty()
-
-    /** Samples as a guaranteed non-null list. Empty for meta packets. */
-    val samplesOrEmpty: List<SensorSample> get() = samples ?: emptyList()
-
-    companion object {
-        /** Current protocol version (SPECIFICATION.md §8.1). */
-        const val PROTOCOL_VERSION_CURRENT = 1
-    }
+    /** Samples list guaranteed non-null (empty if missing). Use this for JSONL writes. */
+    val samplesOrEmpty: List<SensorSample>
+        get() = samples ?: emptyList()
 }
 
 /**
- * Single IMU + HR sample within a data packet (SPECIFICATION.md §8.1).
- *
- * Field [t] is a PER-SAMPLE PERIOD in milliseconds (not a cumulative offset).
- * At 100 Hz, t ≈ 10. Re-constructing absolute timestamps requires cumulative
- * summation from the packet's dtr — handled downstream in the Python parser.
+ * One IMU sample in a data packet (SPEC §8.1).
+ * `t` is a per-sample period (ms), NOT a cumulative offset — 10 ms at 100 Hz.
  */
 data class SensorSample(
-    @SerializedName("t")  val t: Long   = 0L,   // per-sample period (ms) — NOT an offset
-    @SerializedName("ax") val ax: Float = 0f,   // Accel X (milli-g)
-    @SerializedName("ay") val ay: Float = 0f,   // Accel Y (milli-g)
-    @SerializedName("az") val az: Float = 0f,   // Accel Z (milli-g)
-    @SerializedName("gx") val gx: Float = 0f,   // Gyro X (deg/s)
-    @SerializedName("gy") val gy: Float = 0f,   // Gyro Y (deg/s)
-    @SerializedName("gz") val gz: Float = 0f,   // Gyro Z (deg/s)
-    @SerializedName("mx") val mx: Float = 0f,   // Mag X (µT) — 0 when sub-sampled
-    @SerializedName("my") val my: Float = 0f,
-    @SerializedName("mz") val mz: Float = 0f,
-    @SerializedName("hr") val hr: Int   = 0     // Heart rate (bpm), 0 = unavailable
-) {
-    /** Accelerometer magnitude in milli-g. */
-    val accelMagnitude: Float
-        get() = kotlin.math.sqrt((ax * ax + ay * ay + az * az).toDouble()).toFloat()
-}
+    @SerializedName("t") val t: Int? = null,       // ms — per-sample period
+    @SerializedName("ax") val ax: Double? = null,  // milli-g
+    @SerializedName("ay") val ay: Double? = null,
+    @SerializedName("az") val az: Double? = null,
+    @SerializedName("gx") val gx: Double? = null,  // deg/s
+    @SerializedName("gy") val gy: Double? = null,
+    @SerializedName("gz") val gz: Double? = null,
+    @SerializedName("mx") val mx: Double? = null,  // µT (0 at 25 Hz undersampled slots)
+    @SerializedName("my") val my: Double? = null,
+    @SerializedName("mz") val mz: Double? = null,
+    @SerializedName("hr") val hr: Int? = null       // bpm (0 if N/A)
+)
 
-/**
- * GPS data snapshot associated with a packet (SPECIFICATION.md §8.1).
- *
- * All trailing fields are nullable because the watch sometimes emits GPS rows
- * with only a fix position and no velocity / heading.
- */
+/** GPS fix at ~1 Hz (SPEC §8.1). */
 data class GpsData(
-    @SerializedName("lat") val lat: Double = 0.0,
-    @SerializedName("lon") val lon: Double = 0.0,
-    @SerializedName("alt") val alt: Float? = null,
-    @SerializedName("spd") val spd: Float? = null,
-    @SerializedName("hdg") val hdg: Float? = null,
-    @SerializedName("acc") val acc: Float? = null,
-    @SerializedName("ts")  val ts: Long    = 0L
-) {
-    /** GPS timestamp in milliseconds (wire format gives seconds). */
-    val timestampMs: Long get() = ts * 1000L
+    @SerializedName("lat") val lat: Double? = null,
+    @SerializedName("lon") val lon: Double? = null,
+    @SerializedName("alt") val alt: Double? = null,
+    @SerializedName("spd") val speed: Double? = null,
+    @SerializedName("hdg") val heading: Double? = null,
+    @SerializedName("acc") val accuracy: Double? = null,
+    @SerializedName("ts") val timestamp: Long? = null
+)
 
-    /** True if latitude and longitude are within valid ranges. */
-    val isValid: Boolean get() = lat in -90.0..90.0 && lon in -180.0..180.0 && !(lat == 0.0 && lon == 0.0)
-}
-
-/**
- * Device metadata included in data packets (SPECIFICATION.md §8.1).
- *
- * Only [bat] is REQUIRED by contract C-020; the others are best-effort.
- */
+/** Metadata fields (SPEC §8.1). */
 data class MetaData(
-    @SerializedName("bat")       val bat: Int?        = null,   // battery %
-    @SerializedName("pres_pa")   val pressurePa: Int? = null,   // pressure (Pa)
-    @SerializedName("temp_c")    val temp: Float?     = null,   // °C (internal temp)
-    @SerializedName("spo2")      val spo2: Int?       = null,
-    @SerializedName("stress")    val stress: Int?     = null,
+    @SerializedName("bat") val battery: Int? = null,
+    @SerializedName("pres_pa") val pressurePa: Int? = null,
+    @SerializedName("temp_c") val tempC: Double? = null,
+    @SerializedName("spo2") val spo2: Int? = null,
+    @SerializedName("stress") val stress: Int? = null,
     @SerializedName("body_batt") val bodyBattery: Int? = null
 )
 
 /**
- * Enriched packet as stored in the JSONL file — adds Android reception metadata.
- * See SPECIFICATION.md §8.5.
+ * A packet that has successfully passed validation in GarminReceiver
+ * and is about to be logged + optionally ACKed.
  */
 data class ReceivedPacket(
-    val receivedAt: String,  // ISO-8601 UTC of Android reception
-    val sessionId: String,   // redundant copy of sid for fast indexing
-    val packet: GarminPacket
+    val packet: GarminPacket,
+    val receivedAtIsoUtc: String,
+    val sessionId: String,
+    val packetIndex: Long
 )

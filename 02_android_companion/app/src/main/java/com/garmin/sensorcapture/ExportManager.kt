@@ -11,126 +11,83 @@ import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-private const val TAG = "ExportManager"
-
 /**
- * Exports JSONL session files via Android's share sheet.
+ * Exports session artifacts via FileProvider + ACTION_SEND (NFR-022, FR-043, SC-008).
  *
- * Implements FR-043 per SPECIFICATION.md §4.4 and NFR-022 (§5.3) — every
- * external hand-off goes through [FileProvider], never a public URI.
- * Realises scenario SC-008.
+ * The FileProvider authority matches AndroidManifest.xml:
+ *     ${applicationId}.provider
+ *
+ * Exported artifacts are staged in cacheDir/exports/ so they are easy to clean.
  */
 class ExportManager(private val context: Context) {
 
     companion object {
-        private const val EXPORT_DIR       = "exports"
+        private const val TAG = "ExportManager"
         private const val AUTHORITY_SUFFIX = ".provider"
-        private const val BUFFER_SIZE      = 8192
     }
 
-    private val exportDir: File by lazy {
-        File(context.filesDir, EXPORT_DIR).also { it.mkdirs() }
-    }
+    private val authority: String
+        get() = context.applicationContext.packageName + AUTHORITY_SUFFIX
 
-    /**
-     * Copy the first JSONL part of [sessionId] into the exports dir and
-     * return a FileProvider URI. Returns null if no files exist.
-     */
-    fun exportJsonl(sessionId: String, fileLogger: FileLogger): Uri? {
-        val files = fileLogger.getSessionFiles(sessionId)
-        if (files.isEmpty()) {
-            Log.w(TAG, "No JSONL for session $sessionId")
-            return null
-        }
-        val source = files.first()
-        val dest   = File(exportDir, source.name)
+    private fun exportsDir(): File =
+        File(context.cacheDir, "exports").apply { mkdirs() }
+
+    /** Copy the JSONL into cacheDir/exports and return a shareable FileProvider Uri. */
+    fun exportJsonl(sid: String, logger: FileLogger): Uri? {
         return try {
-            copyFile(source, dest)
-            getUriForFile(dest)
+            logger.flush()
+            val source = logger.getSessionFile(sid) ?: return null
+            if (!source.exists()) return null
+
+            val dest = File(exportsDir(), "$sid.jsonl")
+            source.copyTo(dest, overwrite = true)
+            FileProvider.getUriForFile(context, authority, dest)
         } catch (t: Throwable) {
-            Log.e(TAG, "exportJsonl failed: ${t.message}", t)
+            Log.e(TAG, "exportJsonl failed", t)
             null
         }
     }
 
-    /**
-     * Archive all JSONL parts of [sessionId] into a ZIP and return its URI.
-     */
-    fun exportZip(sessionId: String, fileLogger: FileLogger): Uri? {
-        val files = fileLogger.getSessionFiles(sessionId)
-        if (files.isEmpty()) {
-            Log.w(TAG, "No files for session $sessionId")
-            return null
-        }
-        val zip = File(exportDir, "$sessionId.zip")
+    /** Zip all JSONL parts of the session and return a shareable Uri. */
+    fun exportZip(sid: String, logger: FileLogger): Uri? {
         return try {
-            ZipOutputStream(FileOutputStream(zip)).use { zos ->
-                for (f in files) {
-                    FileInputStream(f).use { fis ->
-                        zos.putNextEntry(ZipEntry(f.name))
-                        val buf = ByteArray(BUFFER_SIZE)
-                        var n: Int
-                        while (fis.read(buf).also { n = it } > 0) {
-                            zos.write(buf, 0, n)
+            logger.flush()
+            val parts = logger.getSessionFiles(sid)
+            if (parts.isEmpty()) return null
+
+            val zipFile = File(exportsDir(), "$sid.zip")
+            FileOutputStream(zipFile).use { fos ->
+                ZipOutputStream(fos.buffered()).use { zos ->
+                    for (part in parts) {
+                        FileInputStream(part).use { fis ->
+                            zos.putNextEntry(ZipEntry(part.name))
+                            fis.copyTo(zos)
+                            zos.closeEntry()
                         }
-                        zos.closeEntry()
                     }
                 }
             }
-            Log.i(TAG, "ZIP created: ${zip.name} (${zip.length()} B)")
-            getUriForFile(zip)
+            FileProvider.getUriForFile(context, authority, zipFile)
         } catch (t: Throwable) {
-            Log.e(TAG, "exportZip failed: ${t.message}", t)
+            Log.e(TAG, "exportZip failed", t)
             null
         }
     }
 
-    /**
-     * Launch the Android share sheet for [fileUri] (FR-043).
-     * NFR-022: caller is responsible for passing a FileProvider URI.
-     */
-    fun shareFile(fileUri: Uri, mimeType: String = "application/octet-stream") {
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = mimeType
-            putExtra(Intent.EXTRA_STREAM, fileUri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        val chooser = Intent.createChooser(send, "Share Session Data")
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(chooser)
-    }
-
-    /** Delete previously exported copies for [sessionId]; returns count deleted. */
-    fun deleteExports(sessionId: String): Int {
-        val files = exportDir.listFiles { f -> f.name.startsWith(sessionId) } ?: return 0
-        return files.count { it.delete() }
-    }
-
-    fun listExports(): List<File> =
-        exportDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-
-    fun getTotalExportSize(): Long =
-        exportDir.listFiles()?.sumOf { it.length() } ?: 0L
-
-    // ── Private ──────────────────────────────────────────────────────
-
-    private fun getUriForFile(file: File): Uri =
-        FileProvider.getUriForFile(
-            context,
-            "${context.packageName}$AUTHORITY_SUFFIX",
-            file
-        )
-
-    private fun copyFile(source: File, dest: File) {
-        FileInputStream(source).use { fis ->
-            FileOutputStream(dest).use { fos ->
-                val buf = ByteArray(BUFFER_SIZE)
-                var n: Int
-                while (fis.read(buf).also { n = it } > 0) {
-                    fos.write(buf, 0, n)
-                }
+    /** Fire Intent.ACTION_SEND with the given Uri + mime type. */
+    fun shareFile(uri: Uri, mime: String) {
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            val chooser = Intent.createChooser(intent, "Share session")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(chooser)
+        } catch (t: Throwable) {
+            Log.e(TAG, "shareFile failed", t)
         }
     }
 }
