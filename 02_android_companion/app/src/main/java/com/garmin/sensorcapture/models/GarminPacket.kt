@@ -5,16 +5,22 @@ import com.google.gson.annotations.SerializedName
 /**
  * Root packet received from the Garmin watch via Connect IQ channel.
  * Fields use abbreviated JSON names (protocol v1).
+ *
+ * Note: [samples] is nullable because header/footer packets (pt != null) do not
+ * include the "s" field.  Gson sets absent non-primitive fields to null at runtime
+ * regardless of Kotlin's non-nullable annotation, so all reference-type fields that
+ * may be absent from the JSON wire format must be declared nullable here.
  */
 data class GarminPacket(
-    @SerializedName("pv")  val protocolVersion: Int,
-    @SerializedName("sid") val sessionId: String,
-    @SerializedName("pi")  val packetIndex: Long,
-    @SerializedName("dtr") val deviceTimeReference: Long,
-    @SerializedName("s")   val samples: List<SensorSample>,
-    @SerializedName("gps") val gps: GpsData?,
+    @SerializedName("pv")   val protocolVersion: Int,
+    @SerializedName("sid")  val sessionId: String?,
+    @SerializedName("pi")   val packetIndex: Long,
+    @SerializedName("dtr")  val deviceTimeReference: Long,
+    @SerializedName("s")    val samples: List<SensorSample>?,   // null in header/footer packets
+    @SerializedName("gps")  val gps: GpsData?,
     @SerializedName("meta") val meta: MetaData?,
-    @SerializedName("ef")  val errorFlags: Int = 0
+    @SerializedName("ef")   val errorFlags: Int = 0,
+    @SerializedName("pt")   val packetType: String? = null      // "header" | "footer" | null (data)
 ) {
     /** True if the SENSOR_ERROR bit is set in errorFlags */
     val hasSensorError: Boolean get() = errorFlags and 0x01 != 0
@@ -24,6 +30,12 @@ data class GarminPacket(
     val hasBufferOverflow: Boolean get() = errorFlags and 0x04 != 0
     /** True if the PARTIAL_PACKET bit is set */
     val isPartial: Boolean get() = errorFlags and 0x08 != 0
+
+    /** True if this is a session header or footer packet (not a data packet) */
+    val isMetaPacket: Boolean get() = !packetType.isNullOrEmpty()
+
+    /** Samples as a non-null list (empty for header/footer packets) */
+    val samplesOrEmpty: List<SensorSample> get() = samples ?: emptyList()
 
     companion object {
         const val PROTOCOL_VERSION_CURRENT = 1

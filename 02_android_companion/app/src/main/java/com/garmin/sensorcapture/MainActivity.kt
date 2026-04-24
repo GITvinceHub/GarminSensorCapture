@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.garmin.android.connectiq.ConnectIQ
+import com.garmin.android.connectiq.IQApp
 import com.garmin.android.connectiq.IQDevice
 import kotlinx.coroutines.launch
 
@@ -177,7 +178,7 @@ class MainActivity : AppCompatActivity() {
             onPacketReceived = { packet ->
                 runOnUiThread {
                     viewModel.onPacketReceived(
-                        packet    = packet,
+                        packet          = packet,
                         fileSizeBytes   = fileLogger.getCurrentFileSize(),
                         lossPercent     = garminReceiver?.getPacketLossPercent() ?: 0f,
                         gaps            = garminReceiver?.gapsDetected ?: 0
@@ -186,6 +187,28 @@ class MainActivity : AppCompatActivity() {
             },
             onError = { msg ->
                 runOnUiThread { viewModel.onError(msg) }
+            },
+            // ACK each data packet so the watch can free its persistent queue.
+            // Format expected by watch: {"ack": <packetIndex>}  (CIQ Dictionary).
+            onSendAck = { packetIndex ->
+                val dev = connectedDevice ?: return@GarminReceiver
+                val ackMsg = HashMap<String, Any>().apply { put("ack", packetIndex.toInt()) }
+                ConnectIQManager.sendMessage(
+                    device   = dev,
+                    appId    = WATCH_APP_ID,
+                    message  = ackMsg,
+                    listener = object : ConnectIQ.IQSendMessageListener {
+                        override fun onMessageStatus(
+                            d: IQDevice?,
+                            a: IQApp?,
+                            s: ConnectIQ.IQMessageStatus?
+                        ) {
+                            if (s != ConnectIQ.IQMessageStatus.SUCCESS) {
+                                Log.w(TAG, "ACK send failed for pi=$packetIndex: ${s?.name}")
+                            }
+                        }
+                    }
+                )
             }
         )
 

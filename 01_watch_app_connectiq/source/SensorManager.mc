@@ -21,8 +21,12 @@ class SensorManager {
     //! Callback type: called with each extracted sample dictionary
     typedef SampleCallback as Method(sample as Dictionary) as Void;
 
-    //! Maximum samples in internal buffer
-    private const MAX_BUFFER_SIZE = 400;
+    //! Maximum samples in internal buffer.
+    //! Kept small: the UI only uses the last 50 samples for sparklines.
+    //! A larger buffer causes repeated Array.slice() of 400 elements on every
+    //! new sample once full — each slice allocates a new 400-element array —
+    //! which floods the GC and can cause OOM on memory-limited CIQ runtimes.
+    private const MAX_BUFFER_SIZE = 50;
 
     //! Primary sample rate (accel + gyro)
     private const PRIMARY_RATE_HZ = 100;
@@ -120,7 +124,19 @@ class SensorManager {
     //! @param data SensorData with arrays of accel/gyro/mag values.
     //! Note: HeartRateData only exposes heartBeatIntervals (RR in ms), not bpm —
     //! we poll Sensor.getInfo().heartRate once per batch for the current bpm.
+    //!
+    //! IMPORTANT: wrapped in try/catch — any uncaught exception in this callback
+    //! propagates to the CIQ runtime, which exits the app.
     function onSensorDataReceived(data as Sensor.SensorData) as Void {
+        try {
+            _onSensorDataReceivedImpl(data);
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SensorManager: FATAL in callback: " + ex.getErrorMessage());
+            // Do NOT re-throw — let the app survive the error.
+        }
+    }
+
+    private function _onSensorDataReceivedImpl(data as Sensor.SensorData) as Void {
         // ── Extract batched axis arrays ────────────────────────────
         var accel = (data has :accelerometerData) ? data.accelerometerData : null;
         var gyro  = (data has :gyroscopeData) ? data.gyroscopeData : null;

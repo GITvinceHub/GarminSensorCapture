@@ -1,18 +1,29 @@
 import Toybox.Lang;
 
-//! Manages all UI navigation state for the 6-screen watch interface.
+//! Manages all UI navigation state for the 14-screen watch interface.
 //! Holds: active screen, detail sub-page within a screen, button-lock flag,
 //! and capture-menu visibility. Stateless data only — no drawing or logic.
 class UiState {
 
     //! Screen index constants (must match _drawXxx dispatch in MainView)
-    static const SCREEN_HOME      = 0;
+    static const SCREEN_SUMMARY   = 0;
     static const SCREEN_IMU       = 1;
     static const SCREEN_GPS       = 2;
     static const SCREEN_HR        = 3;
     static const SCREEN_META      = 4;
     static const SCREEN_RECORDING = 5;
-    static const SCREEN_COUNT     = 6;
+    static const SCREEN_BLE       = 6;
+    static const SCREEN_STORAGE   = 7;
+    static const SCREEN_FILESIZE  = 8;
+    static const SCREEN_BUFFER    = 9;
+    static const SCREEN_INTEGRITY = 10;
+    static const SCREEN_SYNCTIME  = 11;
+    static const SCREEN_POWER     = 12;
+    static const SCREEN_PIPELINE  = 13;
+    static const SCREEN_COUNT     = 14;
+
+    //! Backward-compat alias (old code used SCREEN_HOME)
+    static const SCREEN_HOME      = 0;
 
     //! Detail page count for IMU screen (DOWN cycles through them)
     static const IMU_DETAIL_OVERVIEW = 0;
@@ -44,7 +55,7 @@ class UiState {
     private var _menuIndex as Number;
 
     function initialize() {
-        _screenIndex  = SCREEN_HOME;
+        _screenIndex  = SCREEN_SUMMARY;
         _detailIndex  = 0;
         _buttonLocked = false;
         _menuOpen     = false;
@@ -69,11 +80,9 @@ class UiState {
     }
 
     //! How many detail pages does the current screen have?
+    //! All 14 screens support 4 sub-pages (overview + 3 detail pages).
     private function _getMaxDetail() as Number {
-        if (_screenIndex == SCREEN_IMU) {
-            return IMU_DETAIL_COUNT;
-        }
-        return 1;  // other screens have no sub-pages yet
+        return 4;
     }
 
     function getScreenIndex() as Number { return _screenIndex; }

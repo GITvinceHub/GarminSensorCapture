@@ -1,25 +1,35 @@
 <strings>
-  <!-- App name -->
+  <!-- Default / English strings -->
   <string id="app_name">SensorCapture</string>
-
-  <!-- Session status -->
-  <string id="status_idle">CAPTURE PRÊTE</string>
-  <string id="status_recording">ENREGISTREMENT</string>
-  <string id="status_stopping">ARRÊT...</string>
-  <string id="status_button_lock">VERROUILLÉ</string>
-
-  <!-- Screen titles -->
-  <string id="screen_home">ACCUEIL</string>
+  <string id="status_idle">READY</string>
+  <string id="status_recording">RECORDING</string>
+  <string id="status_stopping">STOPPING...</string>
+  <string id="status_button_lock">LOCKED</string>
+  <string id="screen_summary">SUMMARY</string>
   <string id="screen_imu">IMU</string>
   <string id="screen_gps">GPS</string>
-  <string id="screen_hr">FC</string>
-  <string id="screen_meta">MÉTADONNÉES</string>
-  <string id="screen_recording">ENREGISTREMENT</string>
-
-  <!-- Labels -->
-  <string id="label_packets">PAQUETS</string>
-  <string id="label_lost">PERDUS</string>
-  <string id="label_size">TAILLE</string>
+  <string id="screen_hr">HR</string>
+  <string id="screen_meta">METADATA</string>
+  <string id="screen_recording">RECORDING</string>
+  <string id="screen_ble">BLE LINK</string>
+  <string id="screen_storage">PHONE STORAGE</string>
+  <string id="screen_filesize">FILE</string>
+  <string id="screen_buffer">BUFFER</string>
+  <string id="screen_integrity">INTEGRITY</string>
+  <string id="screen_synctime">TIME SYNC</string>
+  <string id="screen_power">BATTERY</string>
+  <string id="screen_pipeline">PIPELINE</string>
+  <string id="menu_new_session">New session</string>
+  <string id="menu_active_sensors">Active sensors</string>
+  <string id="menu_system_info">System info</string>
+  <string id="menu_close">Close</string>
+  <string id="hint_press_start">PRESS START</string>
+  <string id="hint_down_detail">DOWN: sub-page</string>
+  <string id="hint_up_screens">UP: next screen</string>
+  <string id="hint_lock_active">BUTTONS LOCKED</string>
+  <string id="label_packets">PACKETS</string>
+  <string id="label_lost">LOST</string>
+  <string id="label_size">SIZE</string>
   <string id="label_quality">Q</string>
   <string id="label_gps">GPS</string>
   <string id="label_link">BLE</string>
@@ -37,37 +47,11 @@
   <string id="label_rms">RMS</string>
   <string id="label_max">MAX</string>
   <string id="label_min">MIN</string>
-
-  <!-- GPS states -->
   <string id="gps_fix">FIX</string>
   <string id="gps_nofix">NO FIX</string>
   <string id="gps_3d">GPS 3D</string>
-
-  <!-- BLE / link states -->
-  <string id="link_connected">CONN</string>
-  <string id="link_disconnected">DISC</string>
-
-  <!-- Menu items -->
-  <string id="menu_new_session">Nouvelle session</string>
-  <string id="menu_rename_file">Nommer fichier</string>
-  <string id="menu_active_sensors">Capteurs actifs</string>
-  <string id="menu_rates">Fréquences</string>
-  <string id="menu_thresholds">Seuils alertes</string>
-  <string id="menu_system_info">Infos système</string>
-  <string id="menu_close">Fermer</string>
-
-  <!-- Actions -->
-  <string id="start_session">Démarrer</string>
-  <string id="stop_session">Arrêter</string>
-
-  <!-- Hints -->
-  <string id="hint_press_start">APPUYER START</string>
-  <string id="hint_down_detail">DOWN : détails</string>
-  <string id="hint_up_screens">UP : cadrans</string>
-  <string id="hint_lock_active">BOUTONS VERROUILLÉS</string>
-  <string id="hint_long_down_lock">DOWN long : verrouiller</string>
-
-  <!-- Units -->
+  <string id="link_connected">CONNECTED</string>
+  <string id="link_disconnected">DISCONNECTED</string>
   <string id="unit_bpm">bpm</string>
   <string id="unit_hz">Hz</string>
   <string id="unit_ms">ms</string>

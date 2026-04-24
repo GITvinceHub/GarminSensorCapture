@@ -42,6 +42,7 @@ coverage.xml
 # ── Connect IQ / Monkey C ─────────────────────────────────────────────────────
 01_watch_app_connectiq/bin/
 01_watch_app_connectiq/build/
+01_watch_app_connectiq/output/
 01_watch_app_connectiq/.settings/
 *.prg
 *.iq

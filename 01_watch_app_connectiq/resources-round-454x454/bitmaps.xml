@@ -1,0 +1,5 @@
+<resources>
+    <!-- 80×80 px launcher icon for fēnix 8 / 8 Pro (454×454 AMOLED) -->
+    <!-- Replace launcher_icon_80.png with your final artwork           -->
+    <bitmap id="LauncherIcon" filename="images/launcher_icon_80.png" />
+</resources>

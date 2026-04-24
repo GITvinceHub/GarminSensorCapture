@@ -1,3 +1,19 @@
 project.manifest = manifest.xml
+
+# ── Source code (shared across all devices) ──────────────────────────────────
 base.sourcePath = source
+
+# ── Base resources (icons 40×40 baseline, bilingual strings) ─────────────────
 base.resourcePath = resources
+
+# ── High-resolution AMOLED icon override (fēnix 8 — 454×454) ─────────────────
+# The SDK merges resources-round-454x454 on top of base resources for these devices.
+# Place an 80×80 launcher_icon_80.png in resources-round-454x454/images/
+# to get a crisp icon on fēnix 8 displays (replace the placeholder after final artwork).
+fenix843mm.resourcePath    = resources;resources-round-454x454
+fenix847mm.resourcePath    = resources;resources-round-454x454
+fenix8pro47mm.resourcePath = resources;resources-round-454x454
+fenix8solar47mm.resourcePath = resources;resources-round-454x454
+fenix8solar51mm.resourcePath = resources;resources-round-454x454
+
+# fēnix 7 series uses the base resources (40×40 icon from resources/)

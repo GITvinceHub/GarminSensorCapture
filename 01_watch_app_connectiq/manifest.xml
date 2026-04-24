@@ -1,4 +1,10 @@
 <?xml version="1.0"?>
+<!--
+  GarminSensorCapture — Connect IQ Store manifest
+  App UUID:  a3b4c5d6-e7f8-1234-abcd-ef0123456789
+             (register this UUID on developer.garmin.com → "Add App" to get a storeId)
+  Developer: [YOUR NAME / ORGANIZATION]
+-->
 <iq:manifest xmlns:iq="http://www.garmin.com/xml/connectiq" version="1">
     <iq:application entry="GarminSensorApp"
                     id="a3b4c5d6e7f81234abcdef0123456789"
@@ -6,31 +12,45 @@
                     minSdkVersion="3.3.0"
                     name="@Strings.app_name"
                     type="watch-app"
-                    version="1.2.0">
+                    version="1.3.0">
+
+        <!-- ─── Supported devices ──────────────────────────────────── -->
+        <!-- fēnix 7 series  (260×260 round MIP) -->
+        <!-- fēnix 8 series  (454×454 round AMOLED) -->
         <iq:products>
+            <!-- fēnix 7 -->
             <iq:product id="fenix7"/>
             <iq:product id="fenix7s"/>
             <iq:product id="fenix7x"/>
             <iq:product id="fenix7pro"/>
             <iq:product id="fenix7spro"/>
             <iq:product id="fenix7xpro"/>
+            <!-- fēnix 8 -->
             <iq:product id="fenix843mm"/>
             <iq:product id="fenix847mm"/>
             <iq:product id="fenix8pro47mm"/>
             <iq:product id="fenix8solar47mm"/>
             <iq:product id="fenix8solar51mm"/>
         </iq:products>
+
+        <!-- ─── Required permissions ──────────────────────────────── -->
         <iq:permissions>
-            <iq:uses-permission id="Sensor"/>
-            <iq:uses-permission id="SensorHistory"/>
-            <iq:uses-permission id="Positioning"/>
-            <iq:uses-permission id="Communications"/>
-            <iq:uses-permission id="FitContributor"/>
-            <iq:uses-permission id="UserProfile"/>
+            <iq:uses-permission id="Sensor"/>         <!-- IMU (accel/gyro/mag)      -->
+            <iq:uses-permission id="SensorHistory"/>  <!-- HR, SpO2, stress history   -->
+            <iq:uses-permission id="Positioning"/>    <!-- GPS                        -->
+            <iq:uses-permission id="Communications"/> <!-- BLE to Android companion   -->
+            <iq:uses-permission id="FitContributor"/> <!-- FIT record fields          -->
+            <iq:uses-permission id="UserProfile"/>    <!-- User profile in header     -->
         </iq:permissions>
+
+        <!-- ─── Store languages ──────────────────────────────────── -->
         <iq:languages>
             <iq:language>eng</iq:language>
             <iq:language>fra</iq:language>
         </iq:languages>
+
+        <!-- Required by the Connect IQ Store schema, even when empty. -->
+        <iq:barrels/>
+
     </iq:application>
 </iq:manifest>

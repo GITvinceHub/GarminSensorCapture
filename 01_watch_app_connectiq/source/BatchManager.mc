@@ -162,13 +162,20 @@ class BatchManager {
     }
 
     //! Timer callback: batch timeout reached, dispatch whatever we have.
+    //! Wrapped in try/catch: an exception in _dispatchBatch → onBatchReady
+    //! would propagate to the CIQ timer subsystem, which exits the app.
     function _onBatchTimeout() as Void {
         _timerRunning = false;
         _timer = null;
 
         if (_batch.size() > 0) {
             System.println("BatchManager: timeout flush " + _batch.size() + " samples");
-            _dispatchBatch();
+            try {
+                _dispatchBatch();
+            } catch (ex instanceof Lang.Exception) {
+                System.println("BatchManager: FATAL in timeout: " + ex.getErrorMessage());
+                _batch = [] as Array<Dictionary>;  // discard batch to recover
+            }
         }
     }
 
