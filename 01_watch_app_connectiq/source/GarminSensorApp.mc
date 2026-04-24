@@ -1,41 +1,64 @@
-import Toybox.Application;
-import Toybox.Lang;
-import Toybox.WatchUi;
+//! GarminSensorApp.mc
+//! Application entry point.
+//! Responsibility: instantiate SessionManager, provide initial view/delegate.
+//! Keep this file tiny — delegates all behaviour to SessionManager.
+using Toybox.Application;
+using Toybox.WatchUi;
+using Toybox.System;
+using Toybox.Lang;
 
-//! Main application entry point for GarminSensorCapture.
-//! Owns the SessionManager (all sensor sub-systems) and the
-//! UiState + ViewModel helpers that drive the 6-screen UI.
 class GarminSensorApp extends Application.AppBase {
 
-    //! Reference to the session manager (owns all subsystems)
-    private var _sessionManager as SessionManager;
+    //! Shared reference so MainView / MainDelegate can reach the session.
+    public var sessionManager;
 
-    //! Constructor — called once when the app starts
     function initialize() {
         AppBase.initialize();
-        _sessionManager = new SessionManager();
+        sessionManager = null;
     }
 
-    //! Called when the app becomes active (foreground)
-    //! @param state Optional state dictionary from previous invocation
-    function onStart(state as Dictionary?) as Void {
-        _sessionManager.setup();
+    //! onStart is invoked when the app starts up.
+    function onStart(state) {
+        try {
+            sessionManager = new SessionManager();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onStart FATAL " + ex.getErrorMessage());
+        }
     }
 
-    //! Called when the app is being stopped (exit or background)
-    //! @param state Optional state dictionary to persist
-    function onStop(state as Dictionary?) as Void {
-        _sessionManager.cleanup();
+    //! onStop is invoked when the app exits. Make sure any active session is closed.
+    function onStop(state) {
+        try {
+            if (sessionManager != null) {
+                sessionManager.shutdown();
+                sessionManager = null;
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onStop FATAL " + ex.getErrorMessage());
+        }
     }
 
-    //! Return the initial view and delegate pair.
-    //! UiState and ViewModel are created here and shared between view + delegate.
-    //! @return Array of [View, InputDelegate]
-    function getInitialView() as [WatchUi.Views] or [WatchUi.Views, WatchUi.InputDelegates] {
-        var uiState   = new UiState();
-        var viewModel = new ViewModel();
-        var view      = new MainView(_sessionManager, viewModel, uiState);
-        var delegate  = new MainDelegate(_sessionManager, viewModel, uiState, view);
+    //! Return the initial view + delegate pair to the CIQ runtime.
+    //! GIQ-010: returns Array[View, Delegate] as required by AppBase.
+    function getInitialView() {
+        var view = new MainView(sessionManager);
+        var delegate = new MainDelegate(sessionManager, view);
         return [view, delegate];
+    }
+
+    //! GIQ-014: app settings (properties.xml) can be edited via Garmin Connect
+    //! Mobile. When the user changes one, CIQ invokes this callback — we trigger
+    //! a redraw so any setting-dependent display updates immediately.
+    function onSettingsChanged() {
+        try {
+            WatchUi.requestUpdate();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("App: onSettingsChanged err " + ex.getErrorMessage());
+        }
+    }
+
+    //! Global accessor used by other modules to reach the app instance.
+    static function getApp() {
+        return Application.getApp();
     }
 }

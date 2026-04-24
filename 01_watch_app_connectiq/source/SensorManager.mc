@@ -1,673 +1,190 @@
-import Toybox.Sensor;
-import Toybox.Lang;
-import Toybox.System;
-import Toybox.Time;
-import Toybox.ActivityMonitor;
-import Toybox.UserProfile;
-import Toybox.Math;
+//! SensorManager.mc
+//! IMU acquisition (accel + gyro at 100 Hz, magnetometer at 25 Hz) and HR cache.
+//!
+//! INV-009 (critical, fixes v2 crash):
+//!   The onSensorDataReceived callback only pushes samples into BatchManager.
+//!   NO serialization, NO Communications.transmit, NO SensorHistory.*,
+//!   NO Application.Storage.setValue, NO getInfo()-style heavy calls.
+//!
+//! The mag 25 Hz sub-sampling is done by picking one mag sample every 4 IMU samples
+//! (since CIQ delivers accel/gyro/mag together per Sensor.SensorData).
+using Toybox.Sensor;
+using Toybox.Lang;
+using Toybox.System;
+using Toybox.Math;
 
-//! Manages IMU sensor registration and data collection.
-//! Reads: accelerometer (x,y,z), gyroscope (x,y,z), magnetometer (x,y,z), HR.
-//!
-//! Uses Sensor.registerSensorDataListener which delivers batched samples.
-//! Accel and gyro run at PRIMARY_RATE_HZ (100 Hz); magnetometer at MAG_RATE_HZ
-//! (50 Hz). For each primary sample i we use mag sample at index
-//! i / MAG_DOWNSAMPLE_RATIO (= 2).
-//!
-//! HYPOTHESIS H-001: Accelerometer at 100 Hz via Sensor.registerSensorDataListener
-//! HYPOTHESIS H-013: Accelerometer values in milli-g
 class SensorManager {
 
-    //! Callback type: called with each extracted sample dictionary
-    typedef SampleCallback as Method(sample as Dictionary) as Void;
+    public static const IMU_RATE_HZ = 100;   // FR-001, FR-002
+    public static const MAG_RATE_HZ = 25;    // FR-003 (decimated from 100 Hz stream)
+    public static const MAG_DECIM = 4;       // 100 / 25
 
-    //! Maximum samples in internal buffer.
-    //! Kept small: the UI only uses the last 50 samples for sparklines.
-    //! A larger buffer causes repeated Array.slice() of 400 elements on every
-    //! new sample once full — each slice allocates a new 400-element array —
-    //! which floods the GC and can cause OOM on memory-limited CIQ runtimes.
-    private const MAX_BUFFER_SIZE = 50;
+    private var _batchManager;
+    private var _isRegistered;
+    private var _lastHrBpm;            // cached HR, refreshed from Sensor.SensorInfo stream
+    private var _sampleCounter;        // used for mag decimation
+    private var _errorCount;
 
-    //! Primary sample rate (accel + gyro)
-    private const PRIMARY_RATE_HZ = 100;
-
-    //! Magnetometer sample rate — 50 Hz max on fēnix 8 hardware
-    private const MAG_RATE_HZ = 50;
-
-    //! Ratio primary/mag — used to index mag values across primary samples
-    private const MAG_DOWNSAMPLE_RATIO = 2;  // 100 / 50
-
-    //! Callback to deliver samples to SessionManager
-    private var _callback as SampleCallback;
-
-    //! Circular buffer of raw samples
-    private var _buffer as Array<Dictionary>;
-
-    //! Timestamp of last received sample (for t-offset per sample)
-    private var _lastSampleTime as Number;
-
-    //! Counter for frequency measurement window
-    private var _sampleCount as Number;
-
-    //! Timestamp when frequency window started
-    private var _freqWindowStart as Number;
-
-    //! Measured actual frequency in Hz
-    private var _measuredFrequency as Float;
-
-    //! Whether the sensor is currently registered
-    private var _isRegistered as Boolean;
-
-    //! Last RR intervals captured from the batched HeartRateData
-    private var _lastRrIntervals as Array<Number> or Null;
-
-    //! Last polled heart-rate in bpm (cached so getStatus() avoids Sensor.getInfo())
-    private var _lastHrBpm as Number;
-
-    //! @param callback Function called with each new sample
-    function initialize(callback as SampleCallback) {
-        _callback         = callback;
-        _buffer           = [] as Array<Dictionary>;
-        _lastSampleTime   = 0;
-        _sampleCount      = 0;
-        _freqWindowStart  = System.getTimer();
-        _measuredFrequency = PRIMARY_RATE_HZ.toFloat();
-        _isRegistered     = false;
-        _lastRrIntervals  = null;
-        _lastHrBpm        = 0;
+    function initialize(batchManager) {
+        _batchManager = batchManager;
+        _isRegistered = false;
+        _lastHrBpm = 0;
+        _sampleCounter = 0;
+        _errorCount = 0;
     }
 
-    //! Register sensor listeners. Called when session starts.
-    function register() as Void {
+    //! Register with the Sensor framework. Idempotent.
+    //! Returns true on success.
+    //!
+    //! GIQ-020: all optional APIs are gated via `has :` — if the device/firmware
+    //!          doesn't expose them, we fall back silently (fatal "Symbol Not
+    //!          Found" avoided).
+    //! GIQ-022: options dict includes ONLY valid keys per Sensors doc —
+    //!          :accelerometer, :gyroscope, :magnetometer, :heartBeatIntervals.
+    //!          HR (bpm) is NOT an option of registerSensorDataListener; it is
+    //!          refreshed from Sensor.getInfo() by the dispatch Timer (see
+    //!          refreshHrFromInfo below — respects INV-009 outside callback).
+    //! GIQ-023: we log a warning if the requested rate exceeds getMaxSampleRate()
+    //!          but still attempt registration (driver will cap to its own max).
+    function register() {
         if (_isRegistered) {
-            return;
+            return true;
         }
-
-        // Accel/gyro at PRIMARY_RATE_HZ (100 Hz), mag at MAG_RATE_HZ (50 Hz).
-        // HR is polled separately via Sensor.getInfo() — batched HeartRateData
-        // only exposes heartBeatIntervals (RR ms), not bpm.
-        var options = {
-            :period        => 1,  // 1 second batching
-            :accelerometer => { :enabled => true, :sampleRate => PRIMARY_RATE_HZ },
-            :gyroscope     => { :enabled => true, :sampleRate => PRIMARY_RATE_HZ },
-            :magnetometer  => { :enabled => true, :sampleRate => MAG_RATE_HZ }
-        };
-
+        if (!(Toybox.Sensor has :registerSensorDataListener)) {
+            System.println("SensorManager: Sensor.registerSensorDataListener not available on this device");
+            _isRegistered = false;
+            _errorCount += 1;
+            return false;
+        }
         try {
-            Sensor.registerSensorDataListener(method(:onSensorDataReceived), options);
-            _isRegistered    = true;
-            _sampleCount     = 0;
-            _freqWindowStart = System.getTimer();
-            System.println("SensorManager: registered (accel/gyro="
-                + PRIMARY_RATE_HZ + "Hz, mag=" + MAG_RATE_HZ + "Hz)");
+            // GIQ-023: check max sample rate when the API is available.
+            if (Sensor has :getMaxSampleRate) {
+                var maxRate = Sensor.getMaxSampleRate();
+                if (maxRate != null && maxRate < IMU_RATE_HZ) {
+                    System.println("SensorManager: WARN requested " + IMU_RATE_HZ
+                        + " Hz but device max is " + maxRate + " Hz");
+                }
+            }
+
+            // Enable HR in the standard sensor stream so Sensor.getInfo().heartRate
+            // becomes live (used by refreshHrFromInfo below — outside the hot callback).
+            if (Sensor has :setEnabledSensors) {
+                Sensor.setEnabledSensors([Sensor.SENSOR_HEARTRATE]);
+            }
+
+            Sensor.registerSensorDataListener(
+                method(:onSensorDataReceived),
+                {
+                    :period => 1,                                                   // 1-second batches (~100 samples)
+                    :accelerometer => { :enabled => true, :sampleRate => IMU_RATE_HZ },
+                    :gyroscope     => { :enabled => true, :sampleRate => IMU_RATE_HZ },
+                    :magnetometer  => { :enabled => true, :sampleRate => IMU_RATE_HZ }
+                    // NB: no :heartRate key — not a valid option (GIQ-022). HR is
+                    // pulled via Sensor.getInfo() in refreshHrFromInfo() from the Timer.
+                }
+            );
+            _isRegistered = true;
+            System.println("SensorManager: registered at " + IMU_RATE_HZ + " Hz");
+            return true;
         } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: register failed: " + ex.getErrorMessage());
+            System.println("SensorManager: register FAILED " + ex.getErrorMessage());
+            _isRegistered = false;
+            _errorCount += 1;
+            return false;
         }
     }
 
-    //! Unregister sensor listeners. Called when session stops.
-    function unregister() as Void {
+    function unregister() {
         if (!_isRegistered) {
             return;
         }
         try {
-            Sensor.unregisterSensorDataListener();
+            if (Toybox.Sensor has :unregisterSensorDataListener) {
+                Sensor.unregisterSensorDataListener();
+            }
+            if (Sensor has :setEnabledSensors) {
+                Sensor.setEnabledSensors([]);
+            }
         } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: unregister failed: " + ex.getErrorMessage());
+            System.println("SensorManager: unregister err " + ex.getErrorMessage());
         }
         _isRegistered = false;
-        _buffer = [] as Array<Dictionary>;
-        System.println("SensorManager: unregistered");
     }
 
-    //! Batched sensor callback — called by Connect IQ runtime with accumulated samples.
-    //! @param data SensorData with arrays of accel/gyro/mag values.
-    //! Note: HeartRateData only exposes heartBeatIntervals (RR in ms), not bpm —
-    //! we poll Sensor.getInfo().heartRate once per batch for the current bpm.
-    //!
-    //! IMPORTANT: wrapped in try/catch — any uncaught exception in this callback
-    //! propagates to the CIQ runtime, which exits the app.
+    //! HOT PATH — INV-009 / NFR-004: must stay < 50 ms.
+    //! Pure accumulation: unpack arrays, push to buffer, cache HR. That's it.
     function onSensorDataReceived(data as Sensor.SensorData) as Void {
         try {
-            _onSensorDataReceivedImpl(data);
+            if (data == null) { return; }
+
+            var accel = data.accelerometerData;
+            var gyro  = data.gyroscopeData;
+            var mag   = data.magnetometerData;
+            // HeartRateData carries RR intervals only (heartBeatIntervals); bpm is refreshed
+            // by SessionManager's dispatch Timer via Sensor.getInfo() (safe outside this callback).
+            // We do NOT read Sensor.getInfo() here to respect INV-009 / NFR-004.
+
+            if (accel == null || gyro == null) {
+                return;
+            }
+
+            var ax = accel.x;
+            var ay = accel.y;
+            var az = accel.z;
+            var gx = gyro.x;
+            var gy = gyro.y;
+            var gz = gyro.z;
+            var mx = (mag != null) ? mag.x : null;
+            var my = (mag != null) ? mag.y : null;
+            var mz = (mag != null) ? mag.z : null;
+
+            var n = ax.size();
+            if (n == 0) { return; }
+
+            // Period per sample in ms (10 ms at 100 Hz). Fixed per protocol v1.
+            var period = 1000 / IMU_RATE_HZ;
+
+            for (var i = 0; i < n; i += 1) {
+                _sampleCounter += 1;
+                // Mag 25 Hz decimation — emit non-zero mag 1 sample out of MAG_DECIM.
+                var emitMag = ((_sampleCounter % MAG_DECIM) == 0) && (mx != null) && (i < mx.size());
+                var sample = {
+                    "t"  => period,
+                    "ax" => ax[i],
+                    "ay" => ay[i],
+                    "az" => az[i],
+                    "gx" => gx[i],
+                    "gy" => gy[i],
+                    "gz" => gz[i],
+                    "mx" => emitMag ? mx[i] : 0,
+                    "my" => emitMag ? my[i] : 0,
+                    "mz" => emitMag ? mz[i] : 0,
+                    "hr" => _lastHrBpm
+                };
+                _batchManager.push(sample);
+            }
         } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: FATAL in callback: " + ex.getErrorMessage());
-            // Do NOT re-throw — let the app survive the error.
+            // NFR-012/013: never propagate to the runtime.
+            System.println("SensorManager: onSensorDataReceived FATAL " + ex.getErrorMessage());
+            _errorCount += 1;
         }
     }
 
-    private function _onSensorDataReceivedImpl(data as Sensor.SensorData) as Void {
-        // ── Extract batched axis arrays ────────────────────────────
-        var accel = (data has :accelerometerData) ? data.accelerometerData : null;
-        var gyro  = (data has :gyroscopeData) ? data.gyroscopeData : null;
-        var mag   = (data has :magnetometerData) ? data.magnetometerData : null;
+    function getLastHrBpm() { return _lastHrBpm; }
+    function isRegistered() { return _isRegistered; }
+    function getErrorCount() { return _errorCount; }
 
-        // ── Save RR intervals for this batch (for HRV analysis) ───
-        // HeartRateData.heartBeatIntervals is an Array<Number> of RR in ms.
-        if (data has :heartRateData && data.heartRateData != null) {
-            var hrd = data.heartRateData;
-            if (hrd has :heartBeatIntervals && hrd.heartBeatIntervals != null) {
-                _lastRrIntervals = hrd.heartBeatIntervals;
-            } else {
-                _lastRrIntervals = null;
-            }
-        } else {
-            _lastRrIntervals = null;
-        }
-
-        // Point-in-time HR (bpm) snapshot — applied to all samples in this batch
-        var hrNow = 0;
-        var info = Sensor.getInfo();
-        if (info != null && info has :heartRate && info.heartRate != null) {
-            hrNow = info.heartRate as Number;
-        }
-        _lastHrBpm = hrNow;  // cache for getStatus() calls
-
-        // Determine batch size from the primary sensor (accel)
-        var batchSize = 0;
-        if (accel != null && accel.x != null) {
-            batchSize = accel.x.size();
-        } else if (gyro != null && gyro.x != null) {
-            batchSize = gyro.x.size();
-        } else if (mag != null && mag.x != null) {
-            batchSize = mag.x.size();
-        }
-
-        if (batchSize == 0) {
-            return;
-        }
-
-        // Expected per-sample period in ms for the primary (accel/gyro) rate
-        var periodMs = 1000 / PRIMARY_RATE_HZ;
-
-        // ── Cache axis arrays (may be null if sensor disabled) ────
-        var accX = (accel != null) ? accel.x : null;
-        var accY = (accel != null) ? accel.y : null;
-        var accZ = (accel != null) ? accel.z : null;
-        var gyrX = (gyro  != null) ? gyro.x  : null;
-        var gyrY = (gyro  != null) ? gyro.y  : null;
-        var gyrZ = (gyro  != null) ? gyro.z  : null;
-        var magX = (mag   != null) ? mag.x   : null;
-        var magY = (mag   != null) ? mag.y   : null;
-        var magZ = (mag   != null) ? mag.z   : null;
-
-        // ── Iterate and emit one sample per primary (accel/gyro) index ─
-        // Magnetometer is sampled at MAG_RATE_HZ (lower); we hold its value
-        // constant across MAG_DOWNSAMPLE_RATIO primary samples.
-        for (var i = 0; i < batchSize; i++) {
-            var magI = i / MAG_DOWNSAMPLE_RATIO;
-
-            var ax = _safeFloat(accX, i);
-            var ay = _safeFloat(accY, i);
-            var az = _safeFloat(accZ, i);
-
-            var gx = _safeFloat(gyrX, i);
-            var gy = _safeFloat(gyrY, i);
-            var gz = _safeFloat(gyrZ, i);
-
-            var mx = _safeFloat(magX, magI);
-            var my = _safeFloat(magY, magI);
-            var mz = _safeFloat(magZ, magI);
-
-            var sample = {
-                "t"  => periodMs,
-                "ax" => ax, "ay" => ay, "az" => az,
-                "gx" => gx, "gy" => gy, "gz" => gz,
-                "mx" => mx, "my" => my, "mz" => mz,
-                "hr" => hrNow
-            };
-
-            // Buffer management
-            if (_buffer.size() >= MAX_BUFFER_SIZE) {
-                _buffer = _buffer.slice(1, null);
-            }
-            _buffer.add(sample);
-
-            _callback.invoke(sample);
-        }
-
-        _lastSampleTime = System.getTimer();
-
-        // ── Frequency measurement (rolling 1-second window) ────────
-        _sampleCount += batchSize;
-        var elapsed = System.getTimer() - _freqWindowStart;
-        if (elapsed >= 1000) {
-            _measuredFrequency = _sampleCount.toFloat() / (elapsed / 1000.0f);
-            _sampleCount       = 0;
-            _freqWindowStart   = System.getTimer();
-        }
-    }
-
-    //! Safely read a value from a batched axis array at index i.
-    private function _safeFloat(arr as Array?, i as Number) as Float {
-        if (arr == null || i >= arr.size() || arr[i] == null) {
-            return 0.0f;
-        }
-        return arr[i].toFloat();
-    }
-
-    //! Get all samples currently in the buffer.
-    function getSamples() as Array<Dictionary> {
-        return _buffer.slice(0, null);
-    }
-
-    //! Clear entire buffer.
-    function clearBuffer() as Void {
-        _buffer = [] as Array<Dictionary>;
-    }
-
-    //! Get the measured actual frequency.
-    function getMeasuredFrequency() as Float {
-        return _measuredFrequency;
-    }
-
-    //! Get current buffer occupancy.
-    function getBufferSize() as Number {
-        return _buffer.size();
-    }
-
-    //! Check if the sensor is currently registered.
-    function isRegistered() as Boolean {
-        return _isRegistered;
-    }
-
-    //! Return RR intervals (ms) captured from the most recent sensor batch.
-    //! Typically 1-3 values per 1-second batch. Null if HR data was unavailable.
-    function getLastRrIntervals() as Array<Number> or Null {
-        return _lastRrIntervals;
-    }
-
-    //! Last heart-rate bpm cached from the batch callback (no Sensor.getInfo() call).
-    function getLastHrBpm() as Number {
-        return _lastHrBpm;
-    }
-
-    //! True if the last batch delivered at least one RR interval.
-    function hasRrIntervals() as Boolean {
-        return _lastRrIntervals != null && (_lastRrIntervals as Array<Number>).size() > 0;
-    }
-
-    //! Poll real-time Sensor.Info values (pressure, altitude, temperature,
-    //! cadence, power, heading). Returns a Dictionary with only the fields
-    //! that are available at call time.
-    function getLiveSensorInfo() as Dictionary {
-        var info = Sensor.getInfo();
-        var out = {} as Dictionary;
-        if (info == null) { return out; }
-
-        if (info has :pressure && info.pressure != null) {
-            out.put("pres_pa", info.pressure.toNumber());
-        }
-        if (info has :altitude && info.altitude != null) {
-            out.put("alt_baro_m", info.altitude.toFloat());
-        }
-        if (info has :temperature && info.temperature != null) {
-            out.put("temp_c", info.temperature.toFloat());
-        }
-        if (info has :cadence && info.cadence != null) {
-            out.put("cadence", info.cadence.toNumber());
-        }
-        if (info has :power && info.power != null) {
-            out.put("power_w", info.power.toNumber());
-        }
-        if (info has :heading && info.heading != null) {
-            out.put("heading_rad", info.heading.toFloat());
-        }
-        return out;
-    }
-
-    //! Poll ActivityMonitor fields that update slowly (minutes).
-    //! Each (value, age) is returned when available.
-    function getActivityMonitorInfo() as Dictionary {
-        var ai = ActivityMonitor.getInfo();
-        var out = {} as Dictionary;
-        if (ai == null) { return out; }
-
-        if (ai has :respirationRate && ai.respirationRate != null) {
-            out.put("resp", ai.respirationRate.toNumber());
-        }
-        if (ai has :stressScore && ai.stressScore != null) {
-            out.put("stress", ai.stressScore.toNumber());
-        }
-        if (ai has :bodyBatteryLevel && ai.bodyBatteryLevel != null) {
-            out.put("body_batt", ai.bodyBatteryLevel.toNumber());
-        }
-        if (ai has :steps && ai.steps != null) {
-            out.put("steps_day", ai.steps.toNumber());
-        }
-        if (ai has :distance && ai.distance != null) {
-            // ActivityMonitor.Info.distance is in cm → convert to m
-            out.put("dist_day_m", (ai.distance.toNumber() / 100).toNumber());
-        }
-        if (ai has :floorsClimbed && ai.floorsClimbed != null) {
-            out.put("floors_day", ai.floorsClimbed.toNumber());
-        }
-        return out;
-    }
-
-    //! Fetch the user profile (static data set in watch settings).
-    //! Useful for normalising HR/power/distance metrics.
-    function getUserProfile() as Dictionary {
-        var out = {} as Dictionary;
+    //! Safe-to-call-outside-callback helper used by SessionManager's dispatch Timer
+    //! to refresh the HR bpm cache. Respects INV-009: never called from the sensor callback.
+    //! GIQ-020: Sensor.getInfo() is a core API present on every CIQ device, no gate needed.
+    function refreshHrFromInfo() {
         try {
-            var prof = UserProfile.getProfile();
-            if (prof == null) { return out; }
-            if (prof has :weight && prof.weight != null) {
-                out.put("weight_g", prof.weight.toNumber());
-            }
-            if (prof has :height && prof.height != null) {
-                out.put("height_cm", prof.height.toNumber());
-            }
-            if (prof has :birthYear && prof.birthYear != null) {
-                out.put("birth_year", prof.birthYear.toNumber());
-            }
-            if (prof has :gender && prof.gender != null) {
-                out.put("gender",
-                    prof.gender == UserProfile.GENDER_FEMALE ? "F" : "M");
+            var info = Sensor.getInfo();
+            if (info != null && info.heartRate != null && info.heartRate > 0) {
+                _lastHrBpm = info.heartRate;
             }
         } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: UserProfile read failed: " + ex.getErrorMessage());
+            // quiet — HR is optional
         }
-        return out;
-    }
-
-    //! Generic history reader — returns an Array of [ts_unix_s, value] pairs,
-    //! newest first, capped at maxN entries.
-    //! @param iter   A SensorHistoryIterator (may be null if permission/support missing)
-    //! @param maxN   Max entries to return
-    //! @param minTsS Cutoff timestamp in Unix seconds: stop when entry is older
-    //!               (i.e. ts < minTsS). Pass 0 to disable the cutoff.
-    private function _readHistory(iter, maxN as Number, minTsS as Number) as Array {
-        var out = [] as Array;
-        if (iter == null) { return out; }
-        try {
-            var count = 0;
-            while (count < maxN) {
-                var s = iter.next();
-                if (s == null) { break; }
-                if (s.data == null) { count++; continue; }
-                var tsS = 0;
-                if (s has :when && s.when != null) {
-                    tsS = s.when.value();
-                }
-                // newest-first: once we see an entry older than cutoff, stop.
-                if (minTsS > 0 && tsS > 0 && tsS < minTsS) {
-                    break;
-                }
-                out.add([tsS, s.data]);
-                count++;
-            }
-        } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: history read failed: " + ex.getErrorMessage());
-        }
-        return out;
-    }
-
-    //! Get last N HR samples (bpm).
-    function getHrHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getHeartRateHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getHeartRateHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N HRV samples (typically ms RMSSD).
-    function getHrvHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getHeartRateVariabilityHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getHeartRateVariabilityHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N SpO2 samples (%).
-    function getSpo2History(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getOxygenSaturationHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getOxygenSaturationHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N stress samples (0-100).
-    function getStressHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getStressHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getStressHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N pressure samples (Pa).
-    function getPressureHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getPressureHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getPressureHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N temperature samples (°C).
-    function getTemperatureHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getTemperatureHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getTemperatureHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    //! Get last N barometric elevation samples (m).
-    function getElevationHistory(maxN as Number, minTsS as Number) as Array {
-        if (!(Toybox has :SensorHistory)) { return []; }
-        if (!(Toybox.SensorHistory has :getElevationHistory)) { return []; }
-        var iter = Toybox.SensorHistory.getElevationHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        return _readHistory(iter, maxN, minTsS);
-    }
-
-    // ── UI getters ────────────────────────────────────────────────
-
-    //! IMU quality score for UI display (0–100), based on measured vs target Hz.
-    function getImuQualityScore() as Number {
-        var ratio = _measuredFrequency / PRIMARY_RATE_HZ.toFloat();
-        if (ratio > 1.0f) { ratio = 1.0f; }
-        var q = (ratio * 100.0f).toNumber();
-        if (q < 0) { q = 0; }
-        return q;
-    }
-
-    //! Return a summary dictionary for UI (nominal rates, measured rate).
-    function getSampleRateSummary() as Dictionary {
-        return {
-            "accelHz"   => PRIMARY_RATE_HZ,
-            "gyroHz"    => PRIMARY_RATE_HZ,
-            "magHz"     => MAG_RATE_HZ,
-            "measuredHz" => _measuredFrequency,
-            "bufferSize" => _buffer.size()
-        };
-    }
-
-    //! Return the last N ax values from the buffer as a Float array for sparklines.
-    function getAccelWindow(maxPoints as Number) as Array {
-        return _extractAxis("ax", maxPoints);
-    }
-
-    //! Return the last N gx values from the buffer as a Float array for sparklines.
-    function getGyroWindow(maxPoints as Number) as Array {
-        return _extractAxis("gx", maxPoints);
-    }
-
-    //! Return the last N mx values from the buffer as a Float array for sparklines.
-    function getMagWindow(maxPoints as Number) as Array {
-        return _extractAxis("mx", maxPoints);
-    }
-
-    //! Extract the last N values of a given key from the sample buffer.
-    private function _extractAxis(key as String, maxPoints as Number) as Array {
-        var out = [] as Array;
-        var size = _buffer.size();
-        var start = size - maxPoints;
-        if (start < 0) { start = 0; }
-        for (var i = start; i < size; i++) {
-            var s = _buffer[i] as Dictionary;
-            var v = s.get(key);
-            if (v != null) {
-                out.add((v as Float));
-            }
-        }
-        return out;
-    }
-
-    //! Compute RMS / MAX / MIN of a given axis across the last N buffer samples.
-    //! @return Dictionary with "rms", "max", "min" (all Float)
-    function getAxisStats(key as String, maxPoints as Number) as Dictionary {
-        var size = _buffer.size();
-        if (size == 0) {
-            return { "rms" => 0.0f, "max" => 0.0f, "min" => 0.0f };
-        }
-        var start = size - maxPoints;
-        if (start < 0) { start = 0; }
-        var sumSq = 0.0f;
-        var maxV  = -999999.0f;
-        var minV  =  999999.0f;
-        var count = 0;
-        for (var i = start; i < size; i++) {
-            var s = _buffer[i] as Dictionary;
-            var v = s.get(key);
-            if (v == null) { continue; }
-            var fv = (v as Float);
-            sumSq += fv * fv;
-            if (fv > maxV) { maxV = fv; }
-            if (fv < minV) { minV = fv; }
-            count++;
-        }
-        var rms = 0.0f;
-        if (count > 0) {
-            rms = Math.sqrt((sumSq / count.toFloat()).toDouble()).toFloat();
-        }
-        return { "rms" => rms, "max" => maxV, "min" => minV };
-    }
-
-    //! Current heart rate snapshot + RR availability.
-    function getHrSnapshot() as Dictionary {
-        var hr = 0;
-        var info = Sensor.getInfo();
-        if (info != null && (info has :heartRate) && info.heartRate != null) {
-            hr = info.heartRate as Number;
-        }
-        return {
-            "hr"     => hr,
-            "hasRr"  => (_lastRrIntervals != null && _lastRrIntervals.size() > 0),
-            "rrLast" => (_lastRrIntervals != null && _lastRrIntervals.size() > 0)
-                           ? _lastRrIntervals[_lastRrIntervals.size() - 1]
-                           : 0
-        };
-    }
-
-    //! Return last N HR values from SensorHistory as a Float array for mini-graph.
-    //! Ordered oldest-first for left-to-right display.
-    function getHrHistoryWindow(maxPoints as Number) as Array {
-        var out = [] as Array;
-        if (!(Toybox has :SensorHistory)) { return out; }
-        if (!(Toybox.SensorHistory has :getHeartRateHistory)) { return out; }
-        var iter = Toybox.SensorHistory.getHeartRateHistory({
-            :period => 1,
-            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-        });
-        if (iter == null) { return out; }
-        var tmp = [] as Array;
-        var count = 0;
-        while (count < maxPoints) {
-            var s = iter.next();
-            if (s == null || s.data == null) { break; }
-            tmp.add((s.data).toFloat());
-            count++;
-        }
-        // Reverse so graph goes oldest (left) → newest (right)
-        for (var i = tmp.size() - 1; i >= 0; i--) {
-            out.add(tmp[i]);
-        }
-        return out;
-    }
-
-    //! Return a comprehensive meta summary for the META screen.
-    function getMetaSummary() as Dictionary {
-        var out = {} as Dictionary;
-        var info = Sensor.getInfo();
-        if (info != null) {
-            if ((info has :pressure)    && info.pressure    != null) { out.put("pres_pa",    info.pressure.toNumber());  }
-            if ((info has :altitude)    && info.altitude    != null) { out.put("alt_m",      info.altitude.toFloat());   }
-            if ((info has :temperature) && info.temperature != null) { out.put("temp_c",     info.temperature.toFloat());}
-            if ((info has :heading)     && info.heading     != null) { out.put("heading_rad",info.heading.toFloat());    }
-        }
-        var ai = ActivityMonitor.getInfo();
-        if (ai != null) {
-            if ((ai has :respirationRate) && ai.respirationRate != null) { out.put("resp",      ai.respirationRate.toNumber()); }
-            if ((ai has :stressScore)     && ai.stressScore     != null) { out.put("stress",    ai.stressScore.toNumber());     }
-            if ((ai has :bodyBatteryLevel)&& ai.bodyBatteryLevel!= null) { out.put("body_batt", ai.bodyBatteryLevel.toNumber());}
-            if ((ai has :steps)           && ai.steps           != null) { out.put("steps",     ai.steps.toNumber());           }
-        }
-        // SpO2 snapshot
-        var spo2snap = getSpo2Snapshot();
-        if (spo2snap.get("value") != null) {
-            out.put("spo2", spo2snap.get("value"));
-        }
-        return out;
-    }
-
-    //! Get the latest SpO2 (Pulse Ox) measurement along with its age in seconds.
-    //!
-    //! SpO2 on Garmin watches is NOT a continuous sensor — it's sampled
-    //! on-demand (~30 s), or periodically if "All-day Pulse Ox" is enabled
-    //! (typically one measurement per 15-60 min), or during sleep.
-    //! This method reads the newest entry from SensorHistory, which is the
-    //! most recent SpO2 value known to the watch regardless of when it was
-    //! captured (possibly minutes or hours ago).
-    //!
-    //! @return Dictionary with:
-    //!   "value" => Number (0-100) or null if no measurement ever
-    //!   "ageS"  => Number (seconds since measurement) or null
-    function getSpo2Snapshot() as Dictionary {
-        var spo2 = null;
-        var ageS = null;
-        try {
-            if (Toybox has :SensorHistory
-                && Toybox.SensorHistory has :getOxygenSaturationHistory) {
-                var iter = Toybox.SensorHistory.getOxygenSaturationHistory({
-                    :period => 1,
-                    :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
-                });
-                if (iter != null) {
-                    var sample = iter.next();
-                    if (sample != null && sample.data != null) {
-                        spo2 = sample.data.toNumber();
-                        if (sample has :when && sample.when != null) {
-                            var nowSec  = Time.now().value();
-                            var thenSec = sample.when.value();
-                            ageS = nowSec - thenSec;
-                            if (ageS < 0) { ageS = 0; }
-                        }
-                    }
-                }
-            }
-        } catch (ex instanceof Lang.Exception) {
-            System.println("SensorManager: SpO2 read failed: " + ex.getErrorMessage());
-        }
-        return { "value" => spo2, "ageS" => ageS };
     }
 }

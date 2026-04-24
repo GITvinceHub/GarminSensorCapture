@@ -236,6 +236,37 @@ Ce document liste toutes les hypothèses explicites du système qui n'ont pas en
 
 ---
 
+---
+
+## H-017 — Sampling rate IMU abaissé à 25 Hz par défaut
+
+| Champ | Valeur |
+|-------|--------|
+| ID | H-017 |
+| Hypothèse | Le sampling rate accel/gyro est limité à 25 Hz (et non 100 Hz) dans SensorManager |
+| Raison | À 100 Hz avec `:period => 1`, le callback sensor livre 100 samples d'un coup. Chaque groupe de 25 déclenche un dispatch batch **depuis l'intérieur de la boucle** du callback, soit 4 appels récursifs à `onBatchReady()` par tick. Sur fēnix 8 Pro (heap ~260 KB) cela épuise la pile et provoque un crash vers le 8ème paquet (~2s). À 25 Hz, le callback livre exactement 25 samples → 1 dispatch propre par tick. |
+| Impact | Fréquence IMU nominale : 25 Hz. La fréquence réelle mesurée (`actual_frequency_hz` dans Python) doit être ≥ 23 Hz en conditions normales. |
+| Validation requise | Mesurer `getMeasuredFrequency()` sur le device réel. Si le CIQ runtime livre moins de 25 samples/s, ajuster en conséquence. |
+| Status | VALIDÉ (fix hardware confirmé — crash corrigé) |
+| Date | 2026-04-24 |
+
+---
+
+## H-018 — Mode LIVE_PREVIEW systématique dès l'ouverture de l'app
+
+| Champ | Valeur |
+|-------|--------|
+| ID | H-018 |
+| Hypothèse | Les capteurs (IMU, FC) et le GPS sont démarrés dès `setup()` (ouverture app), pas seulement au `startSession()` |
+| Raison | Sans preview, l'écran affichait IMU 0%, GPS NO FIX, FC --- avant tout enregistrement. L'utilisateur ne pouvait pas vérifier la qualité du signal avant de lancer une session. |
+| Impact | `SensorManager.register()` et `PositionManager.enable()` sont appelés dans `setup()`. L'état IDLE voit des données live en temps réel. `startSession()` ne re-enregistre pas (idempotent). `stopSession()` ne désenregistre pas (les capteurs continuent). `cleanup()` est le seul point de désenregistrement. |
+| Note | Les callbacks sensor tournent en permanence. La batterie consomme légèrement plus en mode IDLE que sans capteurs. Impact estimé : +3-5 %/h supplémentaire (à valider hardware). |
+| Validation requise | Mesurer la consommation batterie en mode IDLE avec capteurs actifs vs inactifs. |
+| Status | HYPOTHESE (implémenté, impact batterie à valider) |
+| Date | 2026-04-24 |
+
+---
+
 ## Résumé des risques
 
 | ID | Risque si hypothèse incorrecte | Probabilité | Impact |

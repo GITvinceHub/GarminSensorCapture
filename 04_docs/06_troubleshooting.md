@@ -323,7 +323,51 @@ python -m pytest ../05_tests/test_python/ -v
 
 ---
 
-## 7. Codes d'erreur de référence
+## 7. Bugs hardware confirmés (v1.0.1)
+
+### 7.1 CRASH après ~8 paquets / ~2 secondes d'enregistrement
+
+**Symptôme observé** : L'app passe en RECORDING, affiche 8 paquets, le timer reste bloqué à 00:00:00, puis l'app se ferme et retourne au launcher.
+
+**Cause racine** : À 100 Hz avec `Sensor.registerSensorDataListener({ :period => 1 })`, le callback reçoit 100 samples d'un coup. La boucle interne dans `SensorManager._onSensorDataReceivedImpl` appelle `_callback.invoke(sample)` pour chaque sample. Quand `BatchManager.accumulate()` atteint 25, il dispatch un batch **depuis l'intérieur de la boucle** — 4 dispatches par tick, chacun déclenchant la chaîne complète : `SessionManager.onBatchReady()` → `PacketSerializer` → `CommunicationManager.sendPacket()`. À 2 secondes (8 ticks × 100 Hz = 800 samples = 32 dispatches accumulés), la pile CIQ et/ou le heap sont épuisés.
+
+**Facteurs aggravants** :
+- `_sendHeaderPacket()` alloue 7 tableaux d'historique au démarrage, déjà sous pression mémoire
+- `System.getSystemStats()` + meta cache appelés 4× par tick au lieu de 1×
+
+**Fix appliqué (v1.0.1)** :
+- `PRIMARY_RATE_HZ` abaissé de 100 à **25 Hz** dans `SensorManager.mc`
+- `MAG_DOWNSAMPLE_RATIO` passé de 4 à **1** (mag et IMU au même rate)
+- `_measuredFrequency` initialisé à **0.0f** (indicateur "pas encore mesuré")
+- `ViewModel.computeImuQuality` : diviseur corrigé de 100.0 à **25.0**
+
+**Fichiers modifiés** : `SensorManager.mc`, `ViewModel.mc`
+
+---
+
+### 7.2 Valeurs live nulles avant enregistrement (IMU 0%, GPS 0%, FC ---)
+
+**Symptôme observé** : Avant d'appuyer sur START, tous les indicateurs capteurs affichent 0% / NO FIX / --- bpm. Impossible de vérifier la qualité du signal avant de lancer une session.
+
+**Cause racine** : `SensorManager.register()` et `PositionManager.enable()` n'étaient appelés que dans `startSession()`. En état IDLE, aucun capteur n'était enregistré → `getStatus()` retournait des zéros.
+
+**Fix appliqué (v1.0.1)** :
+- Dans `SessionManager.setup()` : appel immédiat de `register()` et `enable()` après le câblage des subsystèmes
+- Dans `SessionManager.startSession()` : appels de register/enable supprimés (déjà actifs, idempotents)
+- Dans `SessionManager.stopSession()` : appels de unregister/disable supprimés — les capteurs continuent en mode preview après l'arrêt d'une session
+- Dans `SessionManager.cleanup()` (app close) : unregister/disable conservés
+
+**Comportement attendu après fix** :
+- Dès l'ouverture de l'app : IMU affiche ~25 Hz, FC affiche la FC réelle, GPS affiche FIX si signal disponible
+- START lance l'enregistrement sur des capteurs déjà actifs → pas de délai de démarrage
+
+**Fichiers modifiés** : `SessionManager.mc`
+
+**Note batterie** : Les capteurs tournant en permanence (IDLE inclus), la consommation en veille est légèrement supérieure. Impact estimé : +3-5 %/h (à valider hardware — H-018).
+
+---
+
+## 8. Codes d'erreur de référence
 
 | Code | Composant | Description | Action |
 |------|-----------|-------------|--------|

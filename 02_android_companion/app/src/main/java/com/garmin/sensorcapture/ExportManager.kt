@@ -11,163 +11,83 @@ import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-private const val TAG = "ExportManager"
-
 /**
- * Handles exporting and sharing JSONL session files.
+ * Exports session artifacts via FileProvider + ACTION_SEND (NFR-022, FR-043, SC-008).
  *
- * Provides:
- * - exportJsonl: copy JSONL to the shared Downloads directory
- * - exportZip: create a ZIP archive containing the JSONL file
- * - shareFile: launch Android share sheet for a given URI
+ * The FileProvider authority matches AndroidManifest.xml:
+ *     ${applicationId}.provider
+ *
+ * Exported artifacts are staged in cacheDir/exports/ so they are easy to clean.
  */
 class ExportManager(private val context: Context) {
 
     companion object {
-        private const val EXPORT_DIR = "exports"
+        private const val TAG = "ExportManager"
         private const val AUTHORITY_SUFFIX = ".provider"
-        private const val BUFFER_SIZE = 8192
     }
 
-    private val exportDir: File by lazy {
-        File(context.filesDir, EXPORT_DIR).also { it.mkdirs() }
-    }
+    private val authority: String
+        get() = context.applicationContext.packageName + AUTHORITY_SUFFIX
 
-    /**
-     * Copy a session's JSONL file to the export directory and return its URI.
-     *
-     * @param sessionId The session ID (used to find the JSONL file)
-     * @param fileLogger FileLogger instance to get the current file path
-     * @return Content URI of the exported file, or null on failure
-     */
-    fun exportJsonl(sessionId: String, fileLogger: FileLogger): Uri? {
-        val sourceFiles = fileLogger.getSessionFiles(sessionId)
-        if (sourceFiles.isEmpty()) {
-            Log.w(TAG, "No JSONL files found for session $sessionId")
-            return null
-        }
+    private fun exportsDir(): File =
+        File(context.cacheDir, "exports").apply { mkdirs() }
 
-        // If multiple files (rotated), use the first one; for full export use ZIP
-        val sourceFile = sourceFiles.first()
-        val destFile = File(exportDir, sourceFile.name)
-
+    /** Copy the JSONL into cacheDir/exports and return a shareable FileProvider Uri. */
+    fun exportJsonl(sid: String, logger: FileLogger): Uri? {
         return try {
-            copyFile(sourceFile, destFile)
-            getUriForFile(destFile)
-        } catch (e: Exception) {
-            Log.e(TAG, "exportJsonl failed: ${e.message}")
+            logger.flush()
+            val source = logger.getSessionFile(sid) ?: return null
+            if (!source.exists()) return null
+
+            val dest = File(exportsDir(), "$sid.jsonl")
+            source.copyTo(dest, overwrite = true)
+            FileProvider.getUriForFile(context, authority, dest)
+        } catch (t: Throwable) {
+            Log.e(TAG, "exportJsonl failed", t)
             null
         }
     }
 
-    /**
-     * Create a ZIP archive containing all JSONL files for a session.
-     *
-     * @param sessionId  The session ID
-     * @param fileLogger FileLogger instance to enumerate session files
-     * @return Content URI of the ZIP file, or null on failure
-     */
-    fun exportZip(sessionId: String, fileLogger: FileLogger): Uri? {
-        val sourceFiles = fileLogger.getSessionFiles(sessionId)
-        if (sourceFiles.isEmpty()) {
-            Log.w(TAG, "No files found for session $sessionId")
-            return null
-        }
-
-        val zipFile = File(exportDir, "${sessionId}.zip")
-
+    /** Zip all JSONL parts of the session and return a shareable Uri. */
+    fun exportZip(sid: String, logger: FileLogger): Uri? {
         return try {
-            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-                for (file in sourceFiles) {
-                    FileInputStream(file).use { fis ->
-                        val entry = ZipEntry(file.name)
-                        zos.putNextEntry(entry)
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var len: Int
-                        while (fis.read(buffer).also { len = it } > 0) {
-                            zos.write(buffer, 0, len)
+            logger.flush()
+            val parts = logger.getSessionFiles(sid)
+            if (parts.isEmpty()) return null
+
+            val zipFile = File(exportsDir(), "$sid.zip")
+            FileOutputStream(zipFile).use { fos ->
+                ZipOutputStream(fos.buffered()).use { zos ->
+                    for (part in parts) {
+                        FileInputStream(part).use { fis ->
+                            zos.putNextEntry(ZipEntry(part.name))
+                            fis.copyTo(zos)
+                            zos.closeEntry()
                         }
-                        zos.closeEntry()
                     }
-                    Log.d(TAG, "Zipped: ${file.name} (${file.length()} bytes)")
                 }
             }
-            Log.i(TAG, "ZIP created: ${zipFile.name} (${zipFile.length()} bytes)")
-            getUriForFile(zipFile)
-        } catch (e: Exception) {
-            Log.e(TAG, "exportZip failed: ${e.message}")
+            FileProvider.getUriForFile(context, authority, zipFile)
+        } catch (t: Throwable) {
+            Log.e(TAG, "exportZip failed", t)
             null
         }
     }
 
-    /**
-     * Launch Android share sheet for a file URI.
-     *
-     * @param fileUri  Content URI of the file to share
-     * @param mimeType MIME type (e.g., "application/json", "application/zip")
-     */
-    fun shareFile(fileUri: Uri, mimeType: String = "application/octet-stream") {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = mimeType
-            putExtra(Intent.EXTRA_STREAM, fileUri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        val chooser = Intent.createChooser(intent, "Share Session Data")
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-        context.startActivity(chooser)
-    }
-
-    /**
-     * Delete a session's export files (cleanup).
-     *
-     * @param sessionId The session ID prefix
-     * @return Number of files deleted
-     */
-    fun deleteExports(sessionId: String): Int {
-        val files = exportDir.listFiles { f -> f.name.startsWith(sessionId) } ?: return 0
-        return files.count { it.delete() }
-    }
-
-    /**
-     * Get a FileProvider URI for a file in the exports directory.
-     */
-    private fun getUriForFile(file: File): Uri {
-        return FileProvider.getUriForFile(
-            context,
-            "${context.packageName}$AUTHORITY_SUFFIX",
-            file
-        )
-    }
-
-    /**
-     * Copy a file using buffered I/O.
-     */
-    private fun copyFile(source: File, dest: File) {
-        FileInputStream(source).use { fis ->
-            FileOutputStream(dest).use { fos ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var len: Int
-                while (fis.read(buffer).also { len = it } > 0) {
-                    fos.write(buffer, 0, len)
-                }
+    /** Fire Intent.ACTION_SEND with the given Uri + mime type. */
+    fun shareFile(uri: Uri, mime: String) {
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            val chooser = Intent.createChooser(intent, "Share session")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(chooser)
+        } catch (t: Throwable) {
+            Log.e(TAG, "shareFile failed", t)
         }
-    }
-
-    /**
-     * List all files in the export directory.
-     * @return List of File objects
-     */
-    fun listExports(): List<File> {
-        return exportDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-    }
-
-    /**
-     * Get total size of all exports in bytes.
-     */
-    fun getTotalExportSize(): Long {
-        return exportDir.listFiles()?.sumOf { it.length() } ?: 0L
     }
 }

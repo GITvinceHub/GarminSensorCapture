@@ -8,245 +8,189 @@ import com.garmin.sensorcapture.models.GarminPacket
 import com.google.gson.Gson
 import com.google.gson.JsonSyntaxException
 
-private const val TAG = "GarminReceiver"
-
 /**
- * Receives and processes messages from the Garmin watch via Connect IQ.
+ * Listener for inbound messages from the watch app.
  *
- * Implements IQApplicationEventListener to receive raw messages,
- * parses them as GarminPacket, validates them, and dispatches
- * to FileLogger and ViewModel.
+ * Contracts (SPEC §7.7):
+ *  - C-060 onMessageReceived — never let an exception escape (outer catch Throwable,
+ *    not Exception — survive LinkageError / OOM mid-BLE). Ack ONLY data packets.
+ *  - C-061 validatePacket — sid non-blank, pi >= 0, samples non-empty for data,
+ *    nullable-safe via isNullOrEmpty.
  *
- * ACK flow: after each valid DATA packet, [onSendAck] is invoked with the
- * packet index so MainActivity can relay {"ack": N} back to the watch.
- * Header/footer packets are logged but not ACK-ed (they have no samples).
+ * Also implements SC-002 (header packet must NEVER crash — isMetaPacket short-circuits
+ * sample validation) and SC-010 (callback exceptions must not kill the app).
  */
 class GarminReceiver(
-    private val fileLogger: FileLogger,
-    private val sessionManager: SessionManager,
     private val onPacketReceived: (GarminPacket) -> Unit,
+    /** Called ONLY for valid data packets (INV-006). Argument = packetIndex to ack. */
+    private val onSendAck: (Long) -> Unit,
     private val onError: (String) -> Unit,
-    private val onSendAck: ((Long) -> Unit)? = null
+    private val onGapDetected: ((expected: Long, got: Long) -> Unit)? = null
 ) : ConnectIQ.IQApplicationEventListener {
+
+    companion object {
+        private const val TAG = "GarminReceiver"
+    }
 
     private val gson = Gson()
 
-    /** Running count of valid packets received */
-    @Volatile
-    var validPacketsCount: Long = 0L
+    @Volatile private var lastPacketIndex: Long = -1L
+    @Volatile var invalidPacketsCount: Long = 0L
+        private set
+    @Volatile var gapsDetected: Long = 0L
+        private set
+    @Volatile var totalReceived: Long = 0L
         private set
 
-    /** Running count of invalid/parse-failed packets */
-    @Volatile
-    var invalidPacketsCount: Long = 0L
-        private set
-
-    /** Last received packet index (for gap detection) */
-    @Volatile
-    private var lastPacketIndex: Long = -1L
-
-    /** Running count of detected gaps (missing packet indices) */
-    @Volatile
-    var gapsDetected: Int = 0
-        private set
-
-    /**
-     * Called by Connect IQ SDK when a message arrives from the watch app.
-     *
-     * @param device       The source IQDevice
-     * @param app          The source IQApp
-     * @param messageData  Raw message data (typically List<Any?> containing a JSON string)
-     * @param status       Message status
-     */
     override fun onMessageReceived(
         device: IQDevice?,
         app: IQApp?,
         messageData: MutableList<Any>?,
         status: ConnectIQ.IQMessageStatus?
     ) {
-        // Outer guard: never let an exception propagate to the ConnectIQ SDK callback,
-        // as that would crash the entire Android app.
+        // OUTER catch Throwable — we must survive LinkageError / OOM / anything.
         try {
-            _processMessage(device, app, messageData, status)
-        } catch (e: Exception) {
-            Log.e(TAG, "Unhandled exception in onMessageReceived: ${e.message}", e)
+            if (status != ConnectIQ.IQMessageStatus.SUCCESS) {
+                invalidPacketsCount++
+                safeOnError("Non-success status: $status")
+                return
+            }
+
+            if (messageData.isNullOrEmpty()) {
+                invalidPacketsCount++
+                safeOnError("Empty messageData")
+                return
+            }
+
+            for (msg in messageData) {
+                processOne(msg)
+            }
+        } catch (t: Throwable) {
+            // Last line of defence.
             invalidPacketsCount++
-            onError("Internal error: ${e.message?.take(120)}")
+            Log.e(TAG, "onMessageReceived FATAL", t)
+            safeOnError("onMessageReceived threw: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
-    private fun _processMessage(
-        device: IQDevice?,
-        app: IQApp?,
-        messageData: MutableList<Any>?,
-        status: ConnectIQ.IQMessageStatus?
-    ) {
-        // Check status
-        if (status != ConnectIQ.IQMessageStatus.SUCCESS) {
-            val msg = "Message received with non-SUCCESS status: ${status?.name}"
-            Log.w(TAG, msg)
-            onError(msg)
-            return
-        }
-
-        if (messageData == null) {
-            Log.w(TAG, "Received null messageData")
+    private fun processOne(msg: Any?) {
+        if (msg == null) {
             invalidPacketsCount++
             return
         }
 
-        // Extract JSON string from messageData
-        // Connect IQ SDK wraps messages in a List<Any?>, first element is the payload
-        val jsonString = extractJsonString(messageData)
-        if (jsonString == null) {
-            Log.e(TAG, "Could not extract JSON string from message: ${messageData.javaClass.name}")
-            invalidPacketsCount++
-            onError("Unparseable message type: ${messageData.javaClass.simpleName}")
-            return
-        }
-
-        // Parse and validate
-        val packet = parsePacket(jsonString) ?: run {
-            invalidPacketsCount++
-            return
-        }
-
-        // Validate the packet
-        if (!validatePacket(packet)) {
-            Log.w(TAG, "Packet validation failed for pi=${packet.packetIndex}")
-            invalidPacketsCount++
-            return
-        }
-
-        // Detect sequence gaps only for data packets (meta packets may share pi=0)
-        if (!packet.isMetaPacket) {
-            detectGaps(packet.packetIndex)
-        }
-
-        // Log to file
-        try {
-            fileLogger.logPacket(packet)
-        } catch (e: Exception) {
-            Log.e(TAG, "FileLogger error: ${e.message}")
-            onError("File write error: ${e.message}")
-        }
-
-        // Update session counter and stats
-        sessionManager.onPacketReceived()
-        validPacketsCount++
-        if (!packet.isMetaPacket) {
-            lastPacketIndex = packet.packetIndex
-            // Send ACK so the watch can free the persistent queue entry
-            onSendAck?.invoke(packet.packetIndex)
-        }
-
-        // Dispatch to UI
-        onPacketReceived(packet)
-
-        val sampleCount = packet.samples?.size ?: 0
-        val typeLabel   = if (packet.isMetaPacket) "[${packet.packetType}]" else "data"
-        Log.v(TAG, "Packet #${packet.packetIndex} ($typeLabel): $sampleCount samples")
-    }
-
-    /**
-     * Extract the JSON string from Connect IQ message data.
-     * The SDK wraps the payload in a List<Any?>, so we unwrap it.
-     */
-    private fun extractJsonString(messageData: Any?): String? {
-        return when (messageData) {
-            is String -> messageData
-            is List<*> -> {
-                // First element should be the JSON string
-                when (val first = messageData.firstOrNull()) {
-                    is String -> first
-                    else -> messageData.firstOrNull()?.toString()
+        val packet: GarminPacket? = try {
+            when (msg) {
+                is String -> parseJson(msg)
+                is Map<*, *> -> {
+                    // CIQ can deliver a Dictionary directly — reserialize through Gson.
+                    val json = gson.toJson(msg)
+                    parseJson(json)
+                }
+                else -> {
+                    // Unknown shape — try toString() as a last resort.
+                    parseJson(msg.toString())
                 }
             }
-            else -> messageData?.toString()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Parse threw: ${t.message}")
+            null
+        }
+
+        if (packet == null) {
+            invalidPacketsCount++
+            safeOnError("Parse failed / null packet")
+            return
+        }
+
+        if (!validatePacket(packet)) {
+            invalidPacketsCount++
+            safeOnError("Validation failed: sid=${packet.sessionId} pi=${packet.packetIndex} meta=${packet.isMetaPacket}")
+            return
+        }
+
+        totalReceived++
+
+        // Gap detection (only for data packets — meta can arrive at pi=0 out of order).
+        if (!packet.isMetaPacket) {
+            val pi = packet.packetIndex ?: -1L
+            if (lastPacketIndex >= 0 && pi > lastPacketIndex + 1) {
+                val gapSize = pi - lastPacketIndex - 1
+                gapsDetected += gapSize
+                try {
+                    onGapDetected?.invoke(lastPacketIndex + 1, pi)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "onGapDetected threw", t)
+                }
+            }
+            if (pi > lastPacketIndex) lastPacketIndex = pi
+        }
+
+        // Dispatch to logger/UI BEFORE ack so the file is written first.
+        try {
+            onPacketReceived(packet)
+        } catch (t: Throwable) {
+            Log.e(TAG, "onPacketReceived callback threw", t)
+            safeOnError("onPacketReceived threw: ${t.message}")
+        }
+
+        // INV-006 — never ACK meta packets. FR-013 — ACK every data packet.
+        if (!packet.isMetaPacket) {
+            val pi = packet.packetIndex
+            if (pi != null && pi >= 0) {
+                try {
+                    onSendAck(pi)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "onSendAck threw", t)
+                    safeOnError("ACK send threw: ${t.message}")
+                }
+            }
         }
     }
 
-    /**
-     * Parse a JSON string into a GarminPacket.
-     * Returns null on parse error.
-     */
-    private fun parsePacket(json: String): GarminPacket? {
+    private fun parseJson(json: String?): GarminPacket? {
+        if (json.isNullOrBlank()) return null
         return try {
             gson.fromJson(json, GarminPacket::class.java)
         } catch (e: JsonSyntaxException) {
-            Log.e(TAG, "JSON parse error: ${e.message} | JSON: ${json.take(200)}")
-            onError("JSON parse error: ${e.message?.take(100)}")
+            Log.w(TAG, "JSON syntax: ${e.message}")
             null
-        } catch (e: Exception) {
-            Log.e(TAG, "Unexpected parse error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "JSON parse error: ${t.message}")
             null
         }
     }
 
     /**
-     * Validate that a packet has all required fields and sane values.
+     * C-061 — returns true if valid, false otherwise. NEVER throws.
+     * Meta packets skip the samples-non-empty check (SC-002 / FR-014).
      */
-    private fun validatePacket(packet: GarminPacket): Boolean {
-        if (packet.protocolVersion != GarminPacket.PROTOCOL_VERSION_CURRENT) {
-            Log.w(TAG, "Unknown protocol version: ${packet.protocolVersion}")
-            // Attempt best-effort parsing anyway
-        }
+    fun validatePacket(packet: GarminPacket): Boolean {
+        return try {
+            val sid = packet.sessionId
+            if (sid.isNullOrBlank()) return false
 
-        // sessionId is nullable because Gson can set it to null when absent.
-        if (packet.sessionId.isNullOrBlank()) {
-            Log.w(TAG, "Packet has null or blank sessionId")
-            return false
-        }
+            val pi = packet.packetIndex ?: return false
+            if (pi < 0L) return false
 
-        if (packet.packetIndex < 0) {
-            Log.w(TAG, "Negative packetIndex: ${packet.packetIndex}")
-            return false
-        }
-
-        // Meta packets (header/footer) legitimately have no samples — skip this check.
-        if (!packet.isMetaPacket && packet.samplesOrEmpty.isEmpty() && !packet.isPartial) {
-            Log.w(TAG, "Data packet has empty samples but no PARTIAL flag")
-            // Not a hard failure — could be a keep-alive
-        }
-
-        if (packet.gps != null && !packet.gps.isValid) {
-            Log.w(TAG, "Packet has invalid GPS: lat=${packet.gps.lat} lon=${packet.gps.lon}")
-            // Not a hard failure — just a warning
-        }
-
-        return true
-    }
-
-    /**
-     * Detect gaps in the packet sequence by tracking packet indices.
-     */
-    private fun detectGaps(currentIndex: Long) {
-        if (lastPacketIndex >= 0 && currentIndex > lastPacketIndex + 1) {
-            val gap = (currentIndex - lastPacketIndex - 1).toInt()
-            gapsDetected += gap
-            Log.w(TAG, "Gap detected: expected pi=${lastPacketIndex + 1} got pi=$currentIndex (gap=$gap)")
-            onError("Packet gap: $gap packets lost before pi=$currentIndex")
+            if (packet.isMetaPacket) {
+                // meta: samples may be null/empty
+                true
+            } else {
+                // data: samples must be non-empty (nullable-safe)
+                !packet.samples.isNullOrEmpty()
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "validatePacket threw (returning false)", t)
+            false
         }
     }
 
-    /**
-     * Reset internal counters (call at start of new session).
-     */
-    fun reset() {
-        validPacketsCount   = 0L
-        invalidPacketsCount = 0L
-        gapsDetected        = 0
-        lastPacketIndex     = -1L
-        Log.d(TAG, "Reset counters")
-    }
-
-    /**
-     * Compute packet loss rate estimate.
-     * @return Percentage (0-100) of estimated lost packets, or 0 if no data
-     */
-    fun getPacketLossPercent(): Float {
-        val total = validPacketsCount + gapsDetected
-        if (total == 0L) return 0f
-        return (gapsDetected.toFloat() / total.toFloat()) * 100f
+    private fun safeOnError(msg: String) {
+        try {
+            onError(msg)
+        } catch (t: Throwable) {
+            Log.e(TAG, "onError callback threw", t)
+        }
     }
 }

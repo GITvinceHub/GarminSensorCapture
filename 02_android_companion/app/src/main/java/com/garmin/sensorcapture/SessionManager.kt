@@ -1,137 +1,64 @@
 package com.garmin.sensorcapture
 
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import java.time.Instant
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
+import android.util.Log
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Possible states of a capture session.
- */
-enum class SessionState {
-    IDLE,
-    ACTIVE,
-    STOPPING
-}
-
-/**
- * Immutable snapshot of session metadata.
- */
-data class SessionInfo(
-    val sessionId: String,
-    val startedAt: Instant,
-    val state: SessionState,
-    val packetsReceived: Long = 0L
-)
-
-/**
- * Manages the capture session lifecycle on the Android side.
+ * Android-side session tracker. This is distinct from the watch's SessionManager —
+ * here we only care about file-level bookkeeping: unique sid, start/stop state,
+ * packets received counter.
  *
- * Coordinates session state transitions and exposes session info
- * to ViewModel via StateFlow.
+ * The watch is authoritative for session IDs (sid arrives in every packet), but
+ * the Android side can also start a session locally before the first packet —
+ * the sid generated here is used for the JSONL filename in that case, and the
+ * first packet's sid will override if different.
  */
 class SessionManager {
 
     companion object {
-        private const val DATE_FORMAT = "yyyyMMdd_HHmmss"
+        private const val TAG = "SessionManager"
     }
 
-    /** Current session state as observable flow */
-    private val _sessionState = MutableStateFlow(SessionState.IDLE)
-    val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
+    private val dateFormatter = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
 
-    /** Current active session info (null if IDLE) */
-    private val _sessionInfo = MutableStateFlow<SessionInfo?>(null)
-    val sessionInfo: StateFlow<SessionInfo?> = _sessionInfo.asStateFlow()
+    @Volatile var currentSessionId: String? = null
+        private set
+    @Volatile var isActive: Boolean = false
+        private set
 
-    /** Packet counter for current session */
-    @Volatile
-    private var _packetsReceived: Long = 0L
+    private val _packetsReceived = AtomicLong(0L)
+    val packetsReceived: Long get() = _packetsReceived.get()
 
     /**
-     * Start a new capture session.
-     * No-op if already active.
-     *
-     * @return The generated session ID, or null if not started
+     * Start a new session. Returns the new sid, or null if already active.
      */
+    @Synchronized
     fun startSession(): String? {
-        if (_sessionState.value != SessionState.IDLE) {
+        if (isActive) {
+            Log.w(TAG, "startSession: already active (sid=$currentSessionId)")
             return null
         }
-
-        val sessionId = generateSessionId()
-        val info = SessionInfo(
-            sessionId    = sessionId,
-            startedAt    = Instant.now(),
-            state        = SessionState.ACTIVE,
-            packetsReceived = 0L
-        )
-
-        _packetsReceived = 0L
-        _sessionInfo.value = info
-        _sessionState.value = SessionState.ACTIVE
-
-        return sessionId
+        val sid = dateFormatter.format(Date())
+        currentSessionId = sid
+        isActive = true
+        _packetsReceived.set(0L)
+        return sid
     }
 
-    /**
-     * Stop the current session gracefully.
-     * Transitions to STOPPING then IDLE.
-     */
+    /** Stop the current session. Idempotent. */
+    @Synchronized
     fun stopSession() {
-        if (_sessionState.value != SessionState.ACTIVE) return
-
-        _sessionState.value = SessionState.STOPPING
-        _sessionInfo.value = _sessionInfo.value?.copy(state = SessionState.STOPPING)
-
-        // Transition to IDLE after stop logic completes
-        finalizeStop()
+        isActive = false
     }
 
-    /**
-     * Complete the stop transition (called after flush is done).
-     */
-    private fun finalizeStop() {
-        _sessionState.value = SessionState.IDLE
-        // Keep session info accessible until next session starts
-    }
-
-    /**
-     * Increment packet counter (called by GarminReceiver on each packet).
-     */
+    /** Called by MainActivity/ViewModel each time GarminReceiver delivers a valid packet. */
     fun onPacketReceived() {
-        _packetsReceived++
-        _sessionInfo.value = _sessionInfo.value?.copy(
-            packetsReceived = _packetsReceived
-        )
-    }
-
-    /**
-     * Get the current session ID, or null if no active session.
-     */
-    fun getCurrentSessionId(): String? = _sessionInfo.value?.sessionId
-
-    /**
-     * Get total packets received in the current session.
-     */
-    fun getPacketsReceived(): Long = _packetsReceived
-
-    /**
-     * Check if a session is currently active.
-     */
-    fun isActive(): Boolean = _sessionState.value == SessionState.ACTIVE
-
-    /**
-     * Generate a unique session ID based on current UTC time.
-     * Format: YYYYMMDD_HHMMSS
-     */
-    fun generateSessionId(): String {
-        val now = Instant.now()
-        val formatter = DateTimeFormatter
-            .ofPattern(DATE_FORMAT)
-            .withZone(ZoneOffset.UTC)
-        return formatter.format(now)
+        _packetsReceived.incrementAndGet()
     }
 }

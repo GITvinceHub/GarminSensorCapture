@@ -1,207 +1,65 @@
-import Toybox.Lang;
-import Toybox.System;
-import Toybox.Timer;
-
-//! Accumulates IMU samples and triggers batch dispatch.
+//! BatchManager.mc
+//! Simple FIFO buffer for sensor samples (pure data structure, no timers, no I/O).
 //!
-//! Batch is dispatched when EITHER:
-//!  - MAX_BATCH_SIZE (25) samples accumulated
-//!  - BATCH_TIMEOUT_MS (1000ms) elapsed since first sample in batch
-//!  - Buffer occupancy > URGENT_FLUSH_THRESHOLD → immediate flush
+//! Responsibility:
+//!   - Accept samples pushed from SensorManager (very hot path — O(1)).
+//!   - Let the dispatch Timer pull up to N samples at a time.
+//!   - Cap buffer to MAX_BUFFER to protect memory if the phone is disconnected.
+//!
+//! Contracts:
+//!   C-010 push(sample): 0 <= size() <= MAX_BUFFER (oldest dropped on overflow).
+//!   pop(n): returns Array of up to n samples (oldest first), removes them.
+using Toybox.Lang;
+
 class BatchManager {
 
-    //! Callback type: called when a batch is ready to send
-    typedef BatchCallback as Method(samples as Array<Dictionary>) as Void;
+    //! Hard cap — dispatch Timer drains 25 every 250 ms = 100/s sustained throughput.
+    //! 200 gives us ~2 s headroom if a couple of ticks are delayed.
+    public static const MAX_BUFFER = 200;
 
-    //! Maximum samples per batch (protocol v1 limit)
-    private const MAX_BATCH_SIZE = 25;
+    private var _buffer;       // Array< Dictionary<String, Number> >
+    private var _overflowCount; // how many samples have been dropped due to overflow
 
-    //! Time limit for batch accumulation in milliseconds
-    private const BATCH_TIMEOUT_MS = 1000;
-
-    //! If internal buffer grows beyond this, force immediate flush
-    private const URGENT_FLUSH_THRESHOLD = 80;
-
-    //! Callback for batch delivery
-    private var _callback as BatchCallback;
-
-    //! Current accumulation buffer
-    private var _batch as Array<Dictionary>;
-
-    //! Timestamp of the first sample added to current batch
-    private var _batchStartTime as Number;
-
-    //! Periodic timeout timer
-    private var _timer as Timer.Timer or Null;
-
-    //! Whether the timer is running
-    private var _timerRunning as Boolean;
-
-    //! Total batches sent
-    private var _batchesSent as Number;
-
-    //! Samples dropped due to urgent overflow (never happens currently but tracked)
-    private var _droppedSamples as Number;
-
-    //! Size of the batch most recently dispatched
-    private var _lastBatchSize as Number;
-
-    //! @param callback Function called when a complete batch is ready
-    function initialize(callback as BatchCallback) {
-        _callback       = callback;
-        _batch          = [] as Array<Dictionary>;
-        _batchStartTime = 0;
-        _timer          = null;
-        _timerRunning   = false;
-        _batchesSent    = 0;
-        _droppedSamples = 0;
-        _lastBatchSize  = 0;
+    function initialize() {
+        _buffer = [];
+        _overflowCount = 0;
     }
 
-    //! Reset state (called at session start).
-    function reset() as Void {
-        _batch          = [] as Array<Dictionary>;
-        _batchStartTime = 0;
-        _stopTimer();
-        _batchesSent    = 0;
-        _droppedSamples = 0;
-        _lastBatchSize  = 0;
-    }
-
-    //! Add a sample to the current batch.
-    //! Triggers flush if batch is ready.
-    //! @param sample Sensor sample dictionary
-    function accumulate(sample as Dictionary) as Void {
-        if (_batch.size() == 0) {
-            // First sample — record start time, start timer
-            _batchStartTime = System.getTimer();
-            _startTimer();
+    //! Push a new sample. Oldest sample is dropped if we hit MAX_BUFFER.
+    //! MUST stay O(1) and tiny — called from SensorManager 100 times/s.
+    function push(sample) {
+        if (_buffer.size() >= MAX_BUFFER) {
+            // Drop oldest (buffer overflow → ef flag at serialization time).
+            _buffer = _buffer.slice(1, null);
+            _overflowCount += 1;
         }
+        _buffer.add(sample);
+    }
 
-        _batch.add(sample);
-
-        // Check flush conditions
-        if (_batch.size() >= MAX_BATCH_SIZE) {
-            _dispatchBatch();
-        } else if (_batch.size() >= URGENT_FLUSH_THRESHOLD) {
-            // Emergency: buffer dangerously full
-            System.println("BatchManager: urgent flush at " + _batch.size() + " samples");
-            _dispatchBatch();
+    //! Remove and return up to n oldest samples. Returns [] when empty.
+    function pop(n) {
+        var size = _buffer.size();
+        if (size == 0 || n <= 0) {
+            return [];
         }
+        var take = (size < n) ? size : n;
+        var out = _buffer.slice(0, take);
+        _buffer = _buffer.slice(take, null);
+        return out;
     }
 
-    //! Check if the current batch meets the dispatch criteria.
-    //! @return true if ready to send
-    function isBatchReady() as Boolean {
-        if (_batch.size() == 0) {
-            return false;
-        }
-        if (_batch.size() >= MAX_BATCH_SIZE) {
-            return true;
-        }
-        var elapsed = System.getTimer() - _batchStartTime;
-        return elapsed >= BATCH_TIMEOUT_MS;
+    function size() {
+        return _buffer.size();
     }
 
-    //! Get current batch samples and clear.
-    //! @return Array of sample dictionaries
-    function getBatch() as Array<Dictionary> {
-        var result = _batch.slice(0, null);
-        _batch = [] as Array<Dictionary>;
-        _batchStartTime = 0;
-        return result;
+    function clear() {
+        _buffer = [];
     }
 
-    //! Force dispatch of whatever is in the batch buffer.
-    //! Called at session stop or urgent overflow.
-    function flush() as Void {
-        _stopTimer();
-        if (_batch.size() > 0) {
-            System.println("BatchManager: flush " + _batch.size() + " samples");
-            _dispatchBatch();
-        }
-    }
-
-    //! Internal: dispatch current batch via callback.
-    private function _dispatchBatch() as Void {
-        if (_batch.size() == 0) {
-            return;
-        }
-
-        var batchToSend = _batch.slice(0, null);
-        _batch          = [] as Array<Dictionary>;
-        _batchStartTime = 0;
-        _stopTimer();
-
-        _lastBatchSize = batchToSend.size();
-        _batchesSent++;
-        _callback.invoke(batchToSend);
-    }
-
-    //! Start the timeout timer for batch dispatch.
-    private function _startTimer() as Void {
-        if (_timerRunning) {
-            return;
-        }
-        _timer = new Timer.Timer();
-        (_timer as Timer.Timer).start(
-            method(:_onBatchTimeout),
-            BATCH_TIMEOUT_MS,
-            false  // one-shot
-        );
-        _timerRunning = true;
-    }
-
-    //! Stop and discard the timeout timer.
-    private function _stopTimer() as Void {
-        if (_timer != null) {
-            (_timer as Timer.Timer).stop();
-            _timer = null;
-        }
-        _timerRunning = false;
-    }
-
-    //! Timer callback: batch timeout reached, dispatch whatever we have.
-    //! Wrapped in try/catch: an exception in _dispatchBatch → onBatchReady
-    //! would propagate to the CIQ timer subsystem, which exits the app.
-    function _onBatchTimeout() as Void {
-        _timerRunning = false;
-        _timer = null;
-
-        if (_batch.size() > 0) {
-            System.println("BatchManager: timeout flush " + _batch.size() + " samples");
-            try {
-                _dispatchBatch();
-            } catch (ex instanceof Lang.Exception) {
-                System.println("BatchManager: FATAL in timeout: " + ex.getErrorMessage());
-                _batch = [] as Array<Dictionary>;  // discard batch to recover
-            }
-        }
-    }
-
-    //! @return Number of samples currently in the accumulation buffer
-    function getCurrentBatchSize() as Number {
-        return _batch.size();
-    }
-
-    //! @return Total number of batches dispatched this session
-    function getBatchesSent() as Number {
-        return _batchesSent;
-    }
-
-    //! @return Size of the most recently dispatched batch
-    function getLastBatchSize() as Number {
-        return _lastBatchSize;
-    }
-
-    //! @return Total samples dropped due to overflow
-    function getDroppedSampleCount() as Number {
-        return _droppedSamples;
-    }
-
-    //! @return Current buffer fill as a percentage of the urgent flush threshold
-    function getQueuePressure() as Number {
-        return (_batch.size() * 100) / URGENT_FLUSH_THRESHOLD;
+    //! Read-and-reset: number of samples dropped due to buffer overflow.
+    function consumeOverflowCount() {
+        var n = _overflowCount;
+        _overflowCount = 0;
+        return n;
     }
 }
-

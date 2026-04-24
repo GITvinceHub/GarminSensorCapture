@@ -8,223 +8,170 @@ import com.garmin.android.connectiq.IQDevice
 import com.garmin.android.connectiq.exception.InvalidStateException
 import com.garmin.android.connectiq.exception.ServiceUnavailableException
 
-private const val TAG = "ConnectIQManager"
-
 /**
- * Singleton managing the Connect IQ Mobile SDK lifecycle.
+ * Singleton wrapper around Connect IQ Mobile SDK.
  *
- * Responsibilities:
- * - Initialize and shutdown the SDK
- * - Discover paired Garmin devices
- * - Register listeners for app events
- * - Send messages to the watch
+ * Every SDK call is wrapped in try/catch(Throwable) — the SDK is known to throw
+ * LinkageError and raw RuntimeExceptions on mobile-side BLE glitches.
  *
- * Usage:
- *   ConnectIQManager.initialize(context, onReady = { ... }, onError = { ... })
+ * @see SPECIFICATION.md §7.7, NFR-012
  */
 object ConnectIQManager {
+    private const val TAG = "ConnectIQManager"
 
-    /** Connect IQ SDK instance */
+    @Volatile
     private var connectIQ: ConnectIQ? = null
 
-    /** Application context (stored for later use) */
-    private var appContext: Context? = null
-
-    /** Callback fired when SDK is ready */
-    private var onReadyCallback: (() -> Unit)? = null
-
-    /** Callback fired when SDK initialization fails */
-    private var onErrorCallback: ((String) -> Unit)? = null
-
-    /** Whether the SDK is ready to use */
     @Volatile
-    var isSdkReady: Boolean = false
-        private set
+    private var initialized: Boolean = false
 
     /**
-     * Initialize the Connect IQ SDK.
+     * Initialize the SDK with WIRELESS connection type.
      *
-     * @param context     Application context
-     * @param sdkType     SIMULATOR for testing, PRODUCTION for real devices
-     * @param onReady     Called when SDK is initialized and ready
-     * @param onError     Called if initialization fails
+     * @param onReady invoked on success
+     * @param onError invoked on any failure (SDK error, service unavailable, etc.)
      */
     fun initialize(
         context: Context,
-        sdkType: ConnectIQ.IQConnectType = ConnectIQ.IQConnectType.WIRELESS,
         onReady: () -> Unit,
         onError: (String) -> Unit
     ) {
-        appContext       = context.applicationContext
-        onReadyCallback  = onReady
-        onErrorCallback  = onError
+        try {
+            val instance = ConnectIQ.getInstance(
+                context.applicationContext,
+                ConnectIQ.IQConnectType.WIRELESS
+            )
+            connectIQ = instance
+            instance.initialize(
+                context.applicationContext,
+                true,
+                object : ConnectIQ.ConnectIQListener {
+                    override fun onSdkReady() {
+                        initialized = true
+                        try {
+                            onReady()
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "onReady callback threw", t)
+                        }
+                    }
 
-        connectIQ = ConnectIQ.getInstance(context, sdkType)
+                    override fun onInitializeError(errStatus: ConnectIQ.IQSdkErrorStatus?) {
+                        initialized = false
+                        try {
+                            onError("SDK init error: $errStatus")
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "onError callback threw", t)
+                        }
+                    }
 
-        connectIQ?.initialize(context, true, object : ConnectIQ.ConnectIQListener {
-
-            override fun onSdkReady() {
-                Log.d(TAG, "SDK ready")
-                isSdkReady = true
-                onReady()
+                    override fun onSdkShutDown() {
+                        initialized = false
+                        Log.w(TAG, "SDK shutdown")
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "initialize() failed", t)
+            try {
+                onError("initialize() exception: ${t.message}")
+            } catch (_: Throwable) {
+                // swallow
             }
-
-            override fun onInitializeError(errStatus: ConnectIQ.IQSdkErrorStatus?) {
-                val msg = "SDK init error: ${errStatus?.name ?: "UNKNOWN"}"
-                Log.e(TAG, msg)
-                isSdkReady = false
-                onError(msg)
-            }
-
-            override fun onSdkShutDown() {
-                Log.d(TAG, "SDK shut down")
-                isSdkReady = false
-            }
-        })
+        }
     }
 
-    /**
-     * Get the list of all paired and connected Garmin devices.
-     *
-     * @return List of IQDevice, empty if SDK not ready
-     */
+    /** Returns list of paired/connected devices, or empty list on error. */
     fun getConnectedDevices(): List<IQDevice> {
-        if (!isSdkReady || connectIQ == null) {
-            Log.w(TAG, "getConnectedDevices: SDK not ready")
-            return emptyList()
-        }
+        val iq = connectIQ ?: return emptyList()
         return try {
-            connectIQ?.connectedDevices ?: emptyList()
-        } catch (e: InvalidStateException) {
-            Log.e(TAG, "getConnectedDevices InvalidStateException: ${e.message}")
-            emptyList()
-        } catch (e: ServiceUnavailableException) {
-            Log.e(TAG, "getConnectedDevices ServiceUnavailableException: ${e.message}")
+            iq.connectedDevices ?: emptyList()
+        } catch (t: Throwable) {
+            Log.e(TAG, "getConnectedDevices failed", t)
             emptyList()
         }
     }
 
-    /**
-     * Get the list of known (paired but possibly not connected) devices.
-     *
-     * @return List of IQDevice
-     */
-    fun getKnownDevices(): List<IQDevice> {
-        if (!isSdkReady || connectIQ == null) return emptyList()
-        return try {
-            connectIQ?.knownDevices ?: emptyList()
-        } catch (e: Exception) {
-            Log.e(TAG, "getKnownDevices: ${e.message}")
-            emptyList()
-        }
-    }
-
-    /**
-     * Register for application messages from the watch app.
-     *
-     * @param device   The target IQDevice
-     * @param appId    UUID of the watch app (must match manifest.xml)
-     * @param listener Callback for incoming messages
-     */
+    /** Register for app events (incoming messages from watch app). */
     fun registerForAppEvents(
         device: IQDevice,
-        appId: String,
+        app: IQApp,
         listener: ConnectIQ.IQApplicationEventListener
-    ) {
-        if (!isSdkReady || connectIQ == null) {
-            Log.w(TAG, "registerForAppEvents: SDK not ready")
-            return
+    ): Boolean {
+        val iq = connectIQ ?: return false
+        return try {
+            iq.registerForAppEvents(device, app, listener)
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "registerForAppEvents failed", t)
+            false
         }
+    }
+
+    /** Unregister app events listener. Silent on error. */
+    fun unregisterForAppEvents(device: IQDevice, app: IQApp) {
+        val iq = connectIQ ?: return
         try {
-            val app = IQApp(appId)
-            connectIQ?.registerForAppEvents(device, app, listener)
-            Log.d(TAG, "Registered for app events: device=${device.friendlyName} app=$appId")
-        } catch (e: InvalidStateException) {
-            Log.e(TAG, "registerForAppEvents: ${e.message}")
+            iq.unregisterForApplicationEvents(device, app)
+        } catch (t: Throwable) {
+            Log.e(TAG, "unregisterForAppEvents failed", t)
         }
     }
 
     /**
-     * Unregister from application events for a device.
+     * Send a message to the watch app (e.g. ACK payload).
      *
-     * @param device The IQDevice to unregister from
-     * @param appId  UUID of the watch app
-     */
-    fun unregisterForAppEvents(device: IQDevice, appId: String) {
-        if (connectIQ == null) return
-        try {
-            val app = IQApp(appId)
-            connectIQ?.unregisterForApplicationEvents(device, app)
-        } catch (e: Exception) {
-            Log.e(TAG, "unregisterForAppEvents: ${e.message}")
-        }
-    }
-
-    /**
-     * Send a message to the watch app.
-     *
-     * @param device   Target IQDevice
-     * @param appId    UUID of the watch app
-     * @param message  Message data (any serializable object, typically List<Any>)
-     * @param listener Result listener
+     * @param payload typically `HashMap<String,Any>{"ack" to pi.toInt()}`
+     * @return true if the SDK accepted the call (NOT a delivery guarantee)
      */
     fun sendMessage(
         device: IQDevice,
-        appId: String,
-        message: Any,
+        app: IQApp,
+        payload: Any,
         listener: ConnectIQ.IQSendMessageListener
-    ) {
-        if (!isSdkReady || connectIQ == null) {
-            Log.w(TAG, "sendMessage: SDK not ready")
-            return
-        }
-        try {
-            val app = IQApp(appId)
-            connectIQ?.sendMessage(device, app, message, listener)
+    ): Boolean {
+        val iq = connectIQ ?: return false
+        return try {
+            iq.sendMessage(device, app, payload, listener)
+            true
         } catch (e: InvalidStateException) {
-            Log.e(TAG, "sendMessage InvalidStateException: ${e.message}")
+            Log.e(TAG, "sendMessage invalid state", e)
+            false
         } catch (e: ServiceUnavailableException) {
-            Log.e(TAG, "sendMessage ServiceUnavailableException: ${e.message}")
+            Log.e(TAG, "sendMessage service unavailable", e)
+            false
+        } catch (t: Throwable) {
+            Log.e(TAG, "sendMessage failed", t)
+            false
         }
     }
 
-    /**
-     * Register a device status listener (connected/disconnected events).
-     *
-     * @param device   The IQDevice to monitor
-     * @param listener Status change callback
-     */
+    /** Register for device-level connectivity changes. */
     fun registerForDeviceEvents(
         device: IQDevice,
         listener: ConnectIQ.IQDeviceEventListener
-    ) {
-        if (!isSdkReady || connectIQ == null) return
-        try {
-            connectIQ?.registerForDeviceEvents(device, listener)
-        } catch (e: Exception) {
-            Log.e(TAG, "registerForDeviceEvents: ${e.message}")
+    ): Boolean {
+        val iq = connectIQ ?: return false
+        return try {
+            iq.registerForDeviceEvents(device, listener)
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "registerForDeviceEvents failed", t)
+            false
         }
     }
 
-    /**
-     * Cleanly shut down the Connect IQ SDK.
-     * Should be called from Application.onTerminate() or when app is destroyed.
-     */
-    fun cleanup() {
+    /** Fully shut down the SDK. Safe to call multiple times. */
+    fun cleanup(context: Context) {
+        val iq = connectIQ ?: return
         try {
-            connectIQ?.shutdown(appContext)
-        } catch (e: Exception) {
-            Log.e(TAG, "cleanup: ${e.message}")
+            iq.shutdown(context.applicationContext)
+        } catch (t: Throwable) {
+            Log.e(TAG, "cleanup failed", t)
         } finally {
-            connectIQ  = null
-            isSdkReady = false
-            appContext  = null
+            connectIQ = null
+            initialized = false
         }
-        Log.d(TAG, "Cleaned up")
     }
 
-    /**
-     * Get the raw ConnectIQ instance (for advanced use cases).
-     */
-    fun getInstance(): ConnectIQ? = connectIQ
+    fun isInitialized(): Boolean = initialized
 }
