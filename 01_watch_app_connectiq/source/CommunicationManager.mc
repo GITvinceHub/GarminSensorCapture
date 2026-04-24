@@ -168,6 +168,17 @@ class CommunicationManager {
         return _queue.size();
     }
 
+    //! Return a link-stats snapshot for UI display.
+    //! @return Dictionary with keys: isLinked, packetsSent, sendFailures, queueSize
+    function getLinkStats() as Dictionary {
+        return {
+            "isLinked"     => _isConnected,
+            "packetsSent"  => _packetsSent,
+            "sendFailures" => _sendFailures,
+            "queueSize"    => _queue.size()
+        };
+    }
+
     //! Inner listener class bound to this CommunicationManager.
     class CommListener extends Communications.ConnectionListener {
 

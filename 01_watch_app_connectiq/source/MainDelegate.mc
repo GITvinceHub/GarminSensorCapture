@@ -2,111 +2,190 @@ import Toybox.WatchUi;
 import Toybox.Lang;
 import Toybox.System;
 
-//! Input delegate for the main view.
-//! Handles START/STOP session button and long-press event marking.
+//! Input delegate — maps physical buttons to app actions.
+//!
+//! Button assignment (fēnix 8 Pro physical layout):
+//!   START / STOP  short  → Start / Stop recording
+//!   START / STOP  long   → New session (stop current + start fresh)
+//!   BACK / LAP    short  → Mark event (lap / waypoint)
+//!   BACK / LAP    long   → Cancel / back (close menu, or no-op)
+//!   UP / MENU     short  → Next screen (1 → 2 → … → 6 → 1)
+//!   UP / MENU     long   → Open capture menu (KEY_MENU injected by OS)
+//!   DOWN          short  → Next detail sub-page in current screen
+//!   DOWN          long   → Toggle button lock
+//!
+//! Button lock: when enabled all keys except DOWN are silently eaten.
 class MainDelegate extends WatchUi.InputDelegate {
 
-    //! Reference to session manager
+    //! Threshold for long-press detection in milliseconds
+    private const LONG_PRESS_MS = 1000;
+
     private var _sessionManager as SessionManager;
+    private var _viewModel      as ViewModel;
+    private var _uiState        as UiState;
+    private var _view           as MainView;
 
-    //! Timestamp of last key press (for long-press detection)
-    private var _lastKeyPressTime as Number;
+    //! Timestamp recorded on each key-down event
+    private var _pressTime as Number;
 
-    //! Long press threshold in milliseconds
-    private const LONG_PRESS_THRESHOLD_MS = 1000;
-
-    //! @param sessionManager Shared session manager instance
-    function initialize(sessionManager as SessionManager) {
+    //! @param sessionManager Shared session manager
+    //! @param viewModel      Shared view model (read-only in delegate)
+    //! @param uiState        Shared UI navigation state
+    //! @param view           The main view (for requestUpdate callbacks)
+    function initialize(
+        sessionManager as SessionManager,
+        viewModel      as ViewModel,
+        uiState        as UiState,
+        view           as MainView
+    ) {
         InputDelegate.initialize();
         _sessionManager = sessionManager;
-        _lastKeyPressTime = 0;
+        _viewModel      = viewModel;
+        _uiState        = uiState;
+        _view           = view;
+        _pressTime      = 0;
     }
 
-    //! Called when a key is pressed (button down)
-    //! @param keyEvent The key event containing key code
-    //! @return true if handled, false to propagate
+    //! Record press timestamp when a key is pushed down.
     function onKey(keyEvent as WatchUi.KeyEvent) as Boolean {
-        var key = keyEvent.getKey();
-
-        // Record press timestamp for long-press detection
-        _lastKeyPressTime = System.getTimer();
-
-        return false;  // Let onKeyReleased handle the action
+        _pressTime = System.getTimer();
+        return false;  // key-down never consumes the event
     }
 
-    //! Called when a key is released (button up)
-    //! @param keyEvent The key event containing key code
-    //! @return true if handled, false to propagate
+    //! Act on key release, computing hold duration for long-press detection.
     function onKeyReleased(keyEvent as WatchUi.KeyEvent) as Boolean {
-        var key = keyEvent.getKey();
+        var key  = keyEvent.getKey();
+        var held = System.getTimer() - _pressTime;
 
-        // Calculate hold duration
-        var holdDuration = System.getTimer() - _lastKeyPressTime;
+        // ── Button-lock filter ────────────────────────────────────
+        // Only DOWN (to unlock) passes through when locked.
+        if (_uiState.isButtonLocked() && key != WatchUi.KEY_DOWN) {
+            WatchUi.requestUpdate();  // show lock icon flash
+            return true;
+        }
 
-        // START button: toggle session
+        // ── Capture menu navigation ───────────────────────────────
+        if (_uiState.isMenuOpen()) {
+            return _handleMenuKey(key);
+        }
+
+        // ── Normal button handling ────────────────────────────────
         if (key == WatchUi.KEY_START) {
-            if (holdDuration >= LONG_PRESS_THRESHOLD_MS) {
-                // Long press on START: mark an event
-                _handleMarkEvent();
+            if (held >= LONG_PRESS_MS) {
+                _sessionManager.restartNewSession();
             } else {
-                // Short press: start or stop
                 _handleStartStop();
             }
             WatchUi.requestUpdate();
             return true;
         }
 
-        // ENTER / LAP button: also toggles session (short press)
+        if (key == WatchUi.KEY_ESC) {
+            if (held >= LONG_PRESS_MS) {
+                _handleBackLong();
+            } else {
+                _sessionManager.markEvent();
+            }
+            WatchUi.requestUpdate();
+            return true;
+        }
+
+        if (key == WatchUi.KEY_UP) {
+            _uiState.nextScreen();
+            WatchUi.requestUpdate();
+            return true;
+        }
+
+        // KEY_MENU = long-press UP fired by the OS (no duration check needed)
+        if (key == WatchUi.KEY_MENU) {
+            _uiState.openMenu();
+            WatchUi.requestUpdate();
+            return true;
+        }
+
+        if (key == WatchUi.KEY_DOWN) {
+            if (held >= LONG_PRESS_MS) {
+                _uiState.toggleButtonLock();
+            } else {
+                _uiState.nextDetail();
+            }
+            WatchUi.requestUpdate();
+            return true;
+        }
+
+        // ENTER (some device mappings) — treat as UP for screen cycling
         if (key == WatchUi.KEY_ENTER) {
-            if (holdDuration < LONG_PRESS_THRESHOLD_MS) {
-                _handleStartStop();
-            }
+            _uiState.nextScreen();
             WatchUi.requestUpdate();
             return true;
-        }
-
-        // BACK / DOWN during recording: stop
-        if (key == WatchUi.KEY_DOWN || key == WatchUi.KEY_ESC) {
-            var state = _sessionManager.getState();
-            if (state == SessionManager.STATE_RECORDING) {
-                _sessionManager.stopSession();
-                WatchUi.requestUpdate();
-                return true;
-            }
         }
 
         return false;
     }
 
-    //! Toggle start/stop based on current state
+    // ── Private handlers ──────────────────────────────────────────
+
+    //! Toggle recording state (start if IDLE, stop if RECORDING).
     private function _handleStartStop() as Void {
         var state = _sessionManager.getState();
-
         if (state == SessionManager.STATE_IDLE) {
             _sessionManager.startSession();
         } else if (state == SessionManager.STATE_RECORDING) {
             _sessionManager.stopSession();
         }
-        // If STOPPING, ignore — already in transition
+        // STATE_STOPPING: transition in progress, ignore
     }
 
-    //! Mark a session event (lap/waypoint) via long press
-    private function _handleMarkEvent() as Void {
+    //! BACK long: close menu if open, stop recording with confirmation if active.
+    private function _handleBackLong() as Void {
+        if (_uiState.isMenuOpen()) {
+            _uiState.closeMenu();
+            return;
+        }
+        // If recording, long-press BACK acts as an emergency stop
         if (_sessionManager.getState() == SessionManager.STATE_RECORDING) {
-            _sessionManager.markEvent();
+            _sessionManager.stopSession();
         }
     }
 
-    //! Handle swipe gestures (optional)
-    //! @param swipeEvent The swipe event
-    //! @return true if handled
+    //! Route key events while the capture menu is open.
+    private function _handleMenuKey(key as Number) as Boolean {
+        if (key == WatchUi.KEY_DOWN || key == WatchUi.KEY_UP) {
+            _uiState.nextMenuItem();
+            WatchUi.requestUpdate();
+            return true;
+        }
+        if (key == WatchUi.KEY_START || key == WatchUi.KEY_ENTER) {
+            _executeMenuItem(_uiState.getMenuIndex());
+            _uiState.closeMenu();
+            WatchUi.requestUpdate();
+            return true;
+        }
+        if (key == WatchUi.KEY_ESC) {
+            _uiState.closeMenu();
+            WatchUi.requestUpdate();
+            return true;
+        }
+        return false;
+    }
+
+    //! Execute the selected menu action.
+    private function _executeMenuItem(index as Number) as Void {
+        if (index == UiState.MENU_NEW_SESSION) {
+            _sessionManager.restartNewSession();
+        } else if (index == UiState.MENU_SYS_INFO) {
+            // Navigate to Recording screen for system info
+            // (no action needed — just close menu)
+        }
+        // Other menu items: close menu only
+    }
+
+    //! Swipe handler (passthrough — watch uses button navigation).
     function onSwipe(swipeEvent as WatchUi.SwipeEvent) as Boolean {
         return false;
     }
 
-    //! Handle tap/touch events (optional, only on touchscreen devices)
-    //! @param clickEvent The click event
-    //! @return true if handled
+    //! Tap handler (touchscreen only — fēnix 8 Pro has no touchscreen).
     function onTap(clickEvent as WatchUi.ClickEvent) as Boolean {
         return false;
     }

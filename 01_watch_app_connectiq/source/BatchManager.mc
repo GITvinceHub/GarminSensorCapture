@@ -40,6 +40,12 @@ class BatchManager {
     //! Total batches sent
     private var _batchesSent as Number;
 
+    //! Samples dropped due to urgent overflow (never happens currently but tracked)
+    private var _droppedSamples as Number;
+
+    //! Size of the batch most recently dispatched
+    private var _lastBatchSize as Number;
+
     //! @param callback Function called when a complete batch is ready
     function initialize(callback as BatchCallback) {
         _callback       = callback;
@@ -48,6 +54,8 @@ class BatchManager {
         _timer          = null;
         _timerRunning   = false;
         _batchesSent    = 0;
+        _droppedSamples = 0;
+        _lastBatchSize  = 0;
     }
 
     //! Reset state (called at session start).
@@ -55,7 +63,9 @@ class BatchManager {
         _batch          = [] as Array<Dictionary>;
         _batchStartTime = 0;
         _stopTimer();
-        _batchesSent = 0;
+        _batchesSent    = 0;
+        _droppedSamples = 0;
+        _lastBatchSize  = 0;
     }
 
     //! Add a sample to the current batch.
@@ -123,6 +133,7 @@ class BatchManager {
         _batchStartTime = 0;
         _stopTimer();
 
+        _lastBatchSize = batchToSend.size();
         _batchesSent++;
         _callback.invoke(batchToSend);
     }
@@ -170,4 +181,20 @@ class BatchManager {
     function getBatchesSent() as Number {
         return _batchesSent;
     }
+
+    //! @return Size of the most recently dispatched batch
+    function getLastBatchSize() as Number {
+        return _lastBatchSize;
+    }
+
+    //! @return Total samples dropped due to overflow
+    function getDroppedSampleCount() as Number {
+        return _droppedSamples;
+    }
+
+    //! @return Current buffer fill as a percentage of the urgent flush threshold
+    function getQueuePressure() as Number {
+        return (_batch.size() * 100) / URGENT_FLUSH_THRESHOLD;
+    }
 }
+

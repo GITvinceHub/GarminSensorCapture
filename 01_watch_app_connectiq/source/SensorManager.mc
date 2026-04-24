@@ -4,6 +4,7 @@ import Toybox.System;
 import Toybox.Time;
 import Toybox.ActivityMonitor;
 import Toybox.UserProfile;
+import Toybox.Math;
 
 //! Manages IMU sensor registration and data collection.
 //! Reads: accelerometer (x,y,z), gyroscope (x,y,z), magnetometer (x,y,z), HR.
@@ -446,6 +447,156 @@ class SensorManager {
             :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
         });
         return _readHistory(iter, maxN, minTsS);
+    }
+
+    // ── UI getters ────────────────────────────────────────────────
+
+    //! IMU quality score for UI display (0–100), based on measured vs target Hz.
+    function getImuQualityScore() as Number {
+        var ratio = _measuredFrequency / PRIMARY_RATE_HZ.toFloat();
+        if (ratio > 1.0f) { ratio = 1.0f; }
+        var q = (ratio * 100.0f).toNumber();
+        if (q < 0) { q = 0; }
+        return q;
+    }
+
+    //! Return a summary dictionary for UI (nominal rates, measured rate).
+    function getSampleRateSummary() as Dictionary {
+        return {
+            "accelHz"   => PRIMARY_RATE_HZ,
+            "gyroHz"    => PRIMARY_RATE_HZ,
+            "magHz"     => MAG_RATE_HZ,
+            "measuredHz" => _measuredFrequency,
+            "bufferSize" => _buffer.size()
+        };
+    }
+
+    //! Return the last N ax values from the buffer as a Float array for sparklines.
+    function getAccelWindow(maxPoints as Number) as Array {
+        return _extractAxis("ax", maxPoints);
+    }
+
+    //! Return the last N gx values from the buffer as a Float array for sparklines.
+    function getGyroWindow(maxPoints as Number) as Array {
+        return _extractAxis("gx", maxPoints);
+    }
+
+    //! Return the last N mx values from the buffer as a Float array for sparklines.
+    function getMagWindow(maxPoints as Number) as Array {
+        return _extractAxis("mx", maxPoints);
+    }
+
+    //! Extract the last N values of a given key from the sample buffer.
+    private function _extractAxis(key as String, maxPoints as Number) as Array {
+        var out = [] as Array;
+        var size = _buffer.size();
+        var start = size - maxPoints;
+        if (start < 0) { start = 0; }
+        for (var i = start; i < size; i++) {
+            var s = _buffer[i] as Dictionary;
+            var v = s.get(key);
+            if (v != null) {
+                out.add((v as Float));
+            }
+        }
+        return out;
+    }
+
+    //! Compute RMS / MAX / MIN of a given axis across the last N buffer samples.
+    //! @return Dictionary with "rms", "max", "min" (all Float)
+    function getAxisStats(key as String, maxPoints as Number) as Dictionary {
+        var size = _buffer.size();
+        if (size == 0) {
+            return { "rms" => 0.0f, "max" => 0.0f, "min" => 0.0f };
+        }
+        var start = size - maxPoints;
+        if (start < 0) { start = 0; }
+        var sumSq = 0.0f;
+        var maxV  = -1e9f;
+        var minV  =  1e9f;
+        var count = 0;
+        for (var i = start; i < size; i++) {
+            var s = _buffer[i] as Dictionary;
+            var v = s.get(key);
+            if (v == null) { continue; }
+            var fv = (v as Float);
+            sumSq += fv * fv;
+            if (fv > maxV) { maxV = fv; }
+            if (fv < minV) { minV = fv; }
+            count++;
+        }
+        var rms = 0.0f;
+        if (count > 0) {
+            rms = Math.sqrt((sumSq / count.toFloat()).toDouble()).toFloat();
+        }
+        return { "rms" => rms, "max" => maxV, "min" => minV };
+    }
+
+    //! Current heart rate snapshot + RR availability.
+    function getHrSnapshot() as Dictionary {
+        var hr = 0;
+        var info = Sensor.getInfo();
+        if (info != null && (info has :heartRate) && info.heartRate != null) {
+            hr = info.heartRate as Number;
+        }
+        return {
+            "hr"     => hr,
+            "hasRr"  => (_lastRrIntervals != null && _lastRrIntervals.size() > 0),
+            "rrLast" => (_lastRrIntervals != null && _lastRrIntervals.size() > 0)
+                           ? _lastRrIntervals[_lastRrIntervals.size() - 1]
+                           : 0
+        };
+    }
+
+    //! Return last N HR values from SensorHistory as a Float array for mini-graph.
+    //! Ordered oldest-first for left-to-right display.
+    function getHrHistoryWindow(maxPoints as Number) as Array {
+        var out = [] as Array;
+        if (!(Toybox has :SensorHistory)) { return out; }
+        if (!(Toybox.SensorHistory has :getHeartRateHistory)) { return out; }
+        var iter = Toybox.SensorHistory.getHeartRateHistory({
+            :period => 1,
+            :order  => Toybox.SensorHistory.ORDER_NEWEST_FIRST
+        });
+        if (iter == null) { return out; }
+        var tmp = [] as Array;
+        var count = 0;
+        while (count < maxPoints) {
+            var s = iter.next();
+            if (s == null || s.data == null) { break; }
+            tmp.add((s.data).toFloat());
+            count++;
+        }
+        // Reverse so graph goes oldest (left) → newest (right)
+        for (var i = tmp.size() - 1; i >= 0; i--) {
+            out.add(tmp[i]);
+        }
+        return out;
+    }
+
+    //! Return a comprehensive meta summary for the META screen.
+    function getMetaSummary() as Dictionary {
+        var out = {} as Dictionary;
+        var info = Sensor.getInfo();
+        if (info != null) {
+            if ((info has :pressure)    && info.pressure    != null) { out.put("pres_pa",    info.pressure.toNumber());  }
+            if ((info has :altitude)    && info.altitude    != null) { out.put("alt_m",      info.altitude.toFloat());   }
+            if ((info has :temperature) && info.temperature != null) { out.put("temp_c",     info.temperature.toFloat());}
+            if ((info has :heading)     && info.heading     != null) { out.put("heading_rad",info.heading.toFloat());    }
+        }
+        var ai = ActivityMonitor.getInfo();
+        if (ai != null) {
+            if ((ai has :respirationRate) && ai.respirationRate != null) { out.put("resp",      ai.respirationRate.toNumber()); }
+            if ((ai has :stressScore)     && ai.stressScore     != null) { out.put("stress",    ai.stressScore.toNumber());     }
+            if ((ai has :bodyBatteryLevel)&& ai.bodyBatteryLevel!= null) { out.put("body_batt", ai.bodyBatteryLevel.toNumber());}
+            if ((ai has :steps)           && ai.steps           != null) { out.put("steps",     ai.steps.toNumber());           }
+        }
+        // SpO2 snapshot
+        var spo2snap = getSpo2Snapshot();
+        if (spo2snap.get("value") != null) {
+            out.put("spo2", spo2snap.get("value"));
+        }
+        return out;
     }
 
     //! Get the latest SpO2 (Pulse Ox) measurement along with its age in seconds.

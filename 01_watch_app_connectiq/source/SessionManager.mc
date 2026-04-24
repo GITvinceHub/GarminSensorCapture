@@ -31,6 +31,9 @@ class SessionManager {
     //! Used to filter in-session history entries for the footer packet.
     private var _sessionStartTsS as Number;
 
+    //! System.getTimer() value at session start — used for elapsed-time display.
+    private var _sessionStartTimerMs as Number;
+
     //! Event marks list (timestamps of marked events)
     private var _eventMarks as Array<Number>;
 
@@ -45,13 +48,14 @@ class SessionManager {
 
     //! Constructor — does NOT start capturing; call initialize() first
     function initialize() {
-        _state           = STATE_IDLE;
-        _sessionId       = "";
-        _packetIndex     = 0;
-        _errorCount      = 0;
-        _eventMarks      = [] as Array<Number>;
-        _sessionStartTsS = 0;
-        _initialized     = false;
+        _state                = STATE_IDLE;
+        _sessionId            = "";
+        _packetIndex          = 0;
+        _errorCount           = 0;
+        _eventMarks           = [] as Array<Number>;
+        _sessionStartTsS      = 0;
+        _sessionStartTimerMs  = 0;
+        _initialized          = false;
         _sensorManager   = null;
         _positionManager = null;
         _batchManager    = null;
@@ -101,11 +105,12 @@ class SessionManager {
             return;
         }
 
-        _sessionId       = generateSessionId();
-        _packetIndex     = 0;
-        _errorCount      = 0;
-        _eventMarks      = [] as Array<Number>;
-        _sessionStartTsS = Time.now().value();
+        _sessionId            = generateSessionId();
+        _packetIndex          = 0;
+        _errorCount           = 0;
+        _eventMarks           = [] as Array<Number>;
+        _sessionStartTsS      = Time.now().value();
+        _sessionStartTimerMs  = System.getTimer();
 
         // ── Build and send the session header packet FIRST ─────────
         _sendHeaderPacket();
@@ -261,26 +266,100 @@ class SessionManager {
         return _state;
     }
 
-    //! Return a dictionary snapshot of the current status for UI display.
-    //! @return Dictionary with keys: state, packetCount, hasGpsFix, isLinked, errorCount
+    //! Return a rich dictionary snapshot for UI display.
+    //! Extended fields vs the old minimal version:
+    //!   elapsedMs, sessionId, eventCount, imuFreqHz, lastHr, hasRrIntervals,
+    //!   gpsQualityScore, commQueueSize, estimatedFileSizeBytes, batchesSent
     function getStatus() as Dictionary {
-        var hasGps  = false;
+        var hasGps   = false;
         var isLinked = false;
+        var gpsQ     = 0;
+        var queueSz  = 0;
+        var imuFreq  = 0.0f;
+        var lastHr   = 0;
+        var hasRr    = false;
+        var batches  = 0;
 
         if (_positionManager != null) {
-            hasGps = (_positionManager as PositionManager).hasValidFix();
+            var pm = _positionManager as PositionManager;
+            hasGps = pm.hasValidFix();
+            gpsQ   = pm.getQualityScore();
         }
         if (_commManager != null) {
-            isLinked = (_commManager as CommunicationManager).isConnected();
+            var cm = _commManager as CommunicationManager;
+            isLinked = cm.isConnected();
+            queueSz  = cm.getQueueSize();
+        }
+        if (_sensorManager != null) {
+            var sm = _sensorManager as SensorManager;
+            imuFreq = sm.getMeasuredFrequency();
+            var hrSnap = sm.getHrSnapshot();
+            lastHr = hrSnap.get("hr") as Number;
+            hasRr  = hrSnap.get("hasRr") as Boolean;
+        }
+        if (_batchManager != null) {
+            batches = (_batchManager as BatchManager).getBatchesSent();
         }
 
+        var elapsedMs = 0;
+        if (_state == STATE_RECORDING || _state == STATE_STOPPING) {
+            elapsedMs = System.getTimer() - _sessionStartTimerMs;
+            if (elapsedMs < 0) { elapsedMs = 0; }
+        }
+
+        // Rough file-size estimate: 900 bytes per packet on average
+        var fileSizeBytes = _packetIndex * 900;
+
         return {
-            "state"       => _state,
-            "packetCount" => _packetIndex,
-            "hasGpsFix"   => hasGps,
-            "isLinked"    => isLinked,
-            "errorCount"  => _errorCount
+            "state"                => _state,
+            "sessionId"            => _sessionId,
+            "elapsedMs"            => elapsedMs,
+            "packetCount"          => _packetIndex,
+            "errorCount"           => _errorCount,
+            "eventCount"           => _eventMarks.size(),
+            "hasGpsFix"            => hasGps,
+            "gpsQualityScore"      => gpsQ,
+            "isLinked"             => isLinked,
+            "commQueueSize"        => queueSz,
+            "imuFreqHz"            => imuFreq,
+            "lastHr"               => lastHr,
+            "hasRrIntervals"       => hasRr,
+            "batchesSent"          => batches,
+            "estimatedFileSizeBytes" => fileSizeBytes
         };
+    }
+
+    //! Stop any ongoing session and immediately start a new one.
+    //! Used for the START long-press "new file" action.
+    function restartNewSession() as Void {
+        if (_state == STATE_RECORDING) {
+            stopSession();
+        }
+        if (_state == STATE_IDLE) {
+            startSession();
+        }
+    }
+
+    // ── Sub-manager accessors for UI layers ───────────────────────
+
+    //! @return SensorManager instance, or null if not yet initialised
+    function getSensorManager() as SensorManager or Null {
+        return _sensorManager;
+    }
+
+    //! @return PositionManager instance, or null if not yet initialised
+    function getPositionManager() as PositionManager or Null {
+        return _positionManager;
+    }
+
+    //! @return BatchManager instance, or null if not yet initialised
+    function getBatchManager() as BatchManager or Null {
+        return _batchManager;
+    }
+
+    //! @return CommunicationManager instance, or null if not yet initialised
+    function getCommManager() as CommunicationManager or Null {
+        return _commManager;
     }
 
     //! Callback: called by SensorManager when a new IMU sample is ready.

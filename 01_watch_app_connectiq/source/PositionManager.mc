@@ -188,4 +188,50 @@ class PositionManager {
     function isEnabled() as Boolean {
         return _isEnabled;
     }
+
+    //! GPS quality score for UI display (0–100).
+    //! Derived from the Position.QUALITY_* level of the last fix.
+    //! Returns 0 if no valid fix.
+    function getQualityScore() as Number {
+        if (!_hasValidFix || _lastFix == null) { return 0; }
+        var age = System.getTimer() - _lastFixTime;
+        if (age > MAX_FIX_AGE_MS) { return 0; }
+        var acc = _lastFix.get("acc");
+        if (acc == null) { return 50; }
+        var accVal = (acc as Float);
+        // Map accuracy radius → quality score
+        if (accVal <= 5.0f)  { return 95; }   // GOOD
+        if (accVal <= 15.0f) { return 75; }   // USABLE
+        if (accVal <= 50.0f) { return 40; }   // POOR
+        return 20;
+    }
+
+    //! Return a snapshot Dictionary ready for UI rendering.
+    //! Keys: lat, lon, alt, spd, hdg, acc, fixAge, hasValidFix
+    function getUiSnapshot() as Dictionary {
+        var hasF = hasValidFix();
+        if (!hasF || _lastFix == null) {
+            return {
+                "hasValidFix" => false,
+                "lat"  => 0.0d,
+                "lon"  => 0.0d,
+                "alt"  => 0.0f,
+                "spd"  => 0.0f,
+                "hdg"  => 0.0f,
+                "acc"  => 0.0f,
+                "fixAge" => -1
+            };
+        }
+        var fix = _lastFix as Dictionary;
+        return {
+            "hasValidFix" => true,
+            "lat"     => fix.get("lat"),
+            "lon"     => fix.get("lon"),
+            "alt"     => fix.get("alt"),
+            "spd"     => fix.get("spd"),
+            "hdg"     => fix.get("hdg"),
+            "acc"     => fix.get("acc"),
+            "fixAge"  => System.getTimer() - _lastFixTime
+        };
+    }
 }

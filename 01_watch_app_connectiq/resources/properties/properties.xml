@@ -2,19 +2,19 @@
     <!-- UUID of the companion Android app — must match the id in manifest.xml -->
     <property id="CompanionAppId" type="string">a3b4c5d6-e7f8-1234-abcd-ef0123456789</property>
 
-    <!-- Maximum number of packets to buffer in memory on the watch (H-005) -->
+    <!-- Maximum number of packets to buffer in memory on the watch -->
     <property id="MaxQueueSize" type="number">100</property>
 
-    <!-- Number of IMU samples per batch packet (H-001/H-002: 25 Hz × 1s) -->
+    <!-- Number of IMU samples per batch packet -->
     <property id="BatchSize" type="number">25</property>
 
     <!-- Batch timeout in milliseconds (send even if batch not full) -->
     <property id="BatchTimeoutMs" type="number">1000</property>
 
-    <!-- BLE reconnect interval in milliseconds (H-006: 30s) -->
+    <!-- BLE reconnect interval in milliseconds -->
     <property id="ReconnectIntervalMs" type="number">30000</property>
 
-    <!-- Enable/disable magnetometer capture (H-015) -->
+    <!-- Enable/disable magnetometer capture -->
     <property id="EnableMagnetometer" type="boolean">true</property>
 
     <!-- Enable/disable detailed debug logging (disable in production) -->
@@ -22,4 +22,28 @@
 
     <!-- Protocol version — do not change unless updating protocol schema -->
     <property id="ProtocolVersion" type="number">1</property>
+
+    <!-- UI: enable quality score computation and display -->
+    <property id="EnableUiQualityScores" type="boolean">true</property>
+
+    <!-- UI: default screen index on launch (0=Home) -->
+    <property id="DefaultScreenIndex" type="number">0</property>
+
+    <!-- UI: enable button lock feature -->
+    <property id="EnableButtonLock" type="boolean">true</property>
+
+    <!-- UI: enable mini sparkline graphs on IMU screen -->
+    <property id="EnableMiniGraphs" type="boolean">true</property>
+
+    <!-- UI: show advanced meta fields (resp, body_batt, steps) -->
+    <property id="ShowAdvancedMeta" type="boolean">true</property>
+
+    <!-- UI: long press duration threshold in milliseconds -->
+    <property id="LongPressMs" type="number">1000</property>
+
+    <!-- UI: quality warning threshold (below = orange) -->
+    <property id="QualityWarnThreshold" type="number">80</property>
+
+    <!-- UI: quality error threshold (below = red) -->
+    <property id="QualityErrorThreshold" type="number">50</property>
 </properties>

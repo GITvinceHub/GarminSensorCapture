@@ -3,7 +3,8 @@ import Toybox.Lang;
 import Toybox.WatchUi;
 
 //! Main application entry point for GarminSensorCapture.
-//! Manages the lifecycle of the sensor capture session.
+//! Owns the SessionManager (all sensor sub-systems) and the
+//! UiState + ViewModel helpers that drive the 6-screen UI.
 class GarminSensorApp extends Application.AppBase {
 
     //! Reference to the session manager (owns all subsystems)
@@ -27,11 +28,14 @@ class GarminSensorApp extends Application.AppBase {
         _sessionManager.cleanup();
     }
 
-    //! Return the initial view and delegate pair
+    //! Return the initial view and delegate pair.
+    //! UiState and ViewModel are created here and shared between view + delegate.
     //! @return Array of [View, InputDelegate]
     function getInitialView() as [WatchUi.Views] or [WatchUi.Views, WatchUi.InputDelegates] {
-        var view = new MainView(_sessionManager);
-        var delegate = new MainDelegate(_sessionManager);
+        var uiState   = new UiState();
+        var viewModel = new ViewModel();
+        var view      = new MainView(_sessionManager, viewModel, uiState);
+        var delegate  = new MainDelegate(_sessionManager, viewModel, uiState, view);
         return [view, delegate];
     }
 }
