@@ -1,11 +1,15 @@
 import Toybox.Lang;
 
-//! Manages all UI navigation state for the 14-screen watch interface.
-//! Holds: active screen, detail sub-page within a screen, button-lock flag,
-//! and capture-menu visibility. Stateless data only — no drawing or logic.
+//! UI navigation state — pure data, no drawing or logic.
+//!
+//! Implements FR-020..FR-028 navigation model per SPECIFICATION.md §4.3:
+//!  - 14 screens (SCREEN_SUMMARY..SCREEN_PIPELINE), UP cycles forward.
+//!  - 4 sub-pages per screen, DOWN cycles forward.
+//!  - Button lock (DOWN long-press) gates every key except DOWN.
+//!  - Capture menu overlay (UP long-press).
 class UiState {
 
-    //! Screen index constants (must match _drawXxx dispatch in MainView)
+    // ── Screen indices (14 total) per FR-020 ──────────────────────
     static const SCREEN_SUMMARY   = 0;
     static const SCREEN_IMU       = 1;
     static const SCREEN_GPS       = 2;
@@ -22,37 +26,28 @@ class UiState {
     static const SCREEN_PIPELINE  = 13;
     static const SCREEN_COUNT     = 14;
 
-    //! Backward-compat alias (old code used SCREEN_HOME)
-    static const SCREEN_HOME      = 0;
+    //! Backward-compat alias.
+    static const SCREEN_HOME = 0;
 
-    //! Detail page count for IMU screen (DOWN cycles through them)
+    //! Detail sub-pages (4 per screen per FR-022).
     static const IMU_DETAIL_OVERVIEW = 0;
     static const IMU_DETAIL_ACC      = 1;
     static const IMU_DETAIL_GYRO     = 2;
     static const IMU_DETAIL_MAG      = 3;
     static const IMU_DETAIL_COUNT    = 4;
 
-    //! Capture menu items
-    static const MENU_NEW_SESSION  = 0;
-    static const MENU_SYS_INFO     = 1;
-    static const MENU_SENSORS      = 2;
-    static const MENU_CLOSE        = 3;
-    static const MENU_COUNT        = 4;
+    //! Capture menu items.
+    static const MENU_NEW_SESSION = 0;
+    static const MENU_SYS_INFO    = 1;
+    static const MENU_SENSORS     = 2;
+    static const MENU_CLOSE       = 3;
+    static const MENU_COUNT       = 4;
 
-    //! Active screen index (0 .. SCREEN_COUNT-1)
-    private var _screenIndex as Number;
-
-    //! Active detail sub-page within the current screen
-    private var _detailIndex as Number;
-
-    //! True if buttons are locked (only DOWN unlocks)
+    private var _screenIndex  as Number;
+    private var _detailIndex  as Number;
     private var _buttonLocked as Boolean;
-
-    //! True if the capture menu overlay is open
-    private var _menuOpen as Boolean;
-
-    //! Currently highlighted menu item
-    private var _menuIndex as Number;
+    private var _menuOpen     as Boolean;
+    private var _menuIndex    as Number;
 
     function initialize() {
         _screenIndex  = SCREEN_SUMMARY;
@@ -62,56 +57,39 @@ class UiState {
         _menuIndex    = 0;
     }
 
-    //! Advance to the next screen (circular).
+    //! FR-021 — UP short → next screen (circular).
     function nextScreen() as Void {
         _screenIndex = (_screenIndex + 1) % SCREEN_COUNT;
         _detailIndex = 0;
     }
 
-    //! Step to the next detail sub-page in the current screen.
+    //! FR-022 — DOWN short → next sub-page (circular).
     function nextDetail() as Void {
-        var maxDetail = _getMaxDetail();
-        _detailIndex = (_detailIndex + 1) % maxDetail;
+        _detailIndex = (_detailIndex + 1) % _getMaxDetail();
     }
 
-    //! Reset detail index (e.g. when entering a screen).
-    function resetDetail() as Void {
-        _detailIndex = 0;
-    }
+    function resetDetail() as Void { _detailIndex = 0; }
 
-    //! How many detail pages does the current screen have?
-    //! All 14 screens support 4 sub-pages (overview + 3 detail pages).
-    private function _getMaxDetail() as Number {
-        return 4;
-    }
+    //! All 14 screens expose exactly 4 sub-pages (overview + 3 detail).
+    private function _getMaxDetail() as Number { return 4; }
 
     function getScreenIndex() as Number { return _screenIndex; }
     function getDetailIndex() as Number { return _detailIndex; }
 
-    //! Toggle button lock on/off.
-    function toggleButtonLock() as Void {
-        _buttonLocked = !_buttonLocked;
-    }
+    //! FR-028 — DOWN long → toggle button lock.
+    function toggleButtonLock() as Void { _buttonLocked = !_buttonLocked; }
+    function isButtonLocked()    as Boolean { return _buttonLocked; }
 
-    function isButtonLocked() as Boolean { return _buttonLocked; }
-
-    //! Open the capture menu (reset to first item).
+    //! FR-027 — UP long → open capture menu.
     function openMenu() as Void {
         _menuOpen  = true;
         _menuIndex = 0;
     }
+    function closeMenu() as Void { _menuOpen = false; }
+    function isMenuOpen()  as Boolean { return _menuOpen; }
 
-    //! Close the capture menu.
-    function closeMenu() as Void {
-        _menuOpen = false;
-    }
-
-    function isMenuOpen() as Boolean { return _menuOpen; }
-
-    //! Advance to the next menu item (circular).
     function nextMenuItem() as Void {
         _menuIndex = (_menuIndex + 1) % MENU_COUNT;
     }
-
     function getMenuIndex() as Number { return _menuIndex; }
 }

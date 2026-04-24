@@ -2,40 +2,27 @@ import Toybox.Application;
 import Toybox.Lang;
 import Toybox.System;
 
-//! Persistent ACK-tracked send queue backed by Application.Storage.
+//! Flash-backed ACK-tracked send queue.
 //!
-//! Every packet transmitted over BLE is pushed here immediately.
-//! The entry is removed only when the Android companion confirms receipt
-//! with an ACK message ({"ack": pi}).  On BLE reconnect the watch
-//! retransmits the oldest unacknowledged entries so no data is silently lost
-//! during short disconnections (target: up to ~5 minutes @ 4 pkt/s).
+//! Implements contracts C-040, C-041 per SPECIFICATION.md §7.5.
+//! Targets FR-015 (purge on ACK), FR-016 (survive restart), FR-017 (60 entries).
 //!
-//! Storage layout
-//!   Key "pq"  →  Array of {"pi" => Number, "d" => String}
-//!   "pi" = packet index (monotonic within a session, resets on new session)
-//!   "d"  = full JSON string of the packet
+//! Storage layout: key "pq" → Array of {"pi" => Number, "d" => String}.
 //!
-//! Capacity
-//!   MAX_ENTRIES = 60  →  ≈ 54 KB at ~900 B/packet  (≈ 15 s @ 4 pkt/s)
-//!   Larger values risk OOM: each entry stores a ~900-byte JSON String.
-//!   At 500 entries the in-memory array holds ~450 KB — far above the
-//!   CIQ per-app memory budget (~128 KB on fēnix 8), causing the runtime
-//!   to kill the app after ~15–30 s when ACKs stop arriving (e.g. Android crash).
-//!   60 entries protect against short BLE disconnections without OOM risk.
+//! Capacity: MAX_ENTRIES = 60 (~54 KB at ~900 B/packet).
+//! Larger values risk OOM on fēnix 8 (~128 KB per-app budget).
 //!
-//!   Flash is written every FLUSH_EVERY pushes to reduce wear; a forced flush
-//!   is done on every ACK and on session stop.
+//! INVARIANTS:
+//!  - _entries.size() <= MAX_ENTRIES after every push.
+//!  - After ackUpTo(N), no entry has pi <= N (INV-007).
 class PersistentQueue {
 
     private const STORAGE_KEY = "pq";
     private const MAX_ENTRIES = 60;
-    private const FLUSH_EVERY = 10;   // push-to-flash interval
+    private const FLUSH_EVERY = 10;  // push-to-flash cadence
 
-    //! In-memory mirror of the storage array
     private var _entries as Array;
-
-    //! Number of pushes since last flash write
-    private var _dirty as Number;
+    private var _dirty   as Number;
 
     function initialize() {
         _dirty   = 0;
@@ -43,16 +30,15 @@ class PersistentQueue {
         _loadFromStorage();
     }
 
-    // ── Public API ────────────────────────────────────────────────
-
-    //! Add a packet to the queue.
-    //! Called by SessionManager immediately before handing the packet to
-    //! CommunicationManager.
-    //! @param pi   Monotonic packet index for the current session
-    //! @param json Serialised JSON string of the packet
+    //! C-040 push(pi, json).
+    //! Precondition: pi >= 0; json is non-empty String.
+    //! Postcondition: entry {pi, d:json} is in _entries; if size exceeded
+    //!   MAX_ENTRIES the oldest entry was dropped; flash flushed every
+    //!   FLUSH_EVERY pushes. Invariant preserved.
     function push(pi as Number, json as String) as Void {
+        if (json == null || json.length() == 0) { return; }
+
         if (_entries.size() >= MAX_ENTRIES) {
-            // Drop oldest — a warning is logged but recording continues.
             _entries = _entries.slice(1, null);
             System.println("PersistentQueue: capacity reached, oldest packet dropped");
         }
@@ -63,10 +49,10 @@ class PersistentQueue {
         }
     }
 
-    //! Remove all entries whose packet index is ≤ ackPi.
-    //! Called by CommunicationManager when the Android companion sends an ACK.
-    //! Forces an immediate flash write so the deletion survives a crash.
-    //! @param ackPi Highest packet index confirmed received by Android
+    //! C-041 ackUpTo(ackPi).
+    //! Precondition: ackPi >= 0.
+    //! Postcondition: all entries with pi <= ackPi removed (INV-007);
+    //!   flash flushed if at least one entry was removed.
     function ackUpTo(ackPi as Number) as Void {
         var before = _entries.size();
         var kept   = [] as Array;
@@ -79,36 +65,26 @@ class PersistentQueue {
         var removed = before - kept.size();
         if (removed > 0) {
             _entries = kept;
-            _writeToStorage();  // forced flush — deletion must be durable
+            _writeToStorage();
             System.println("PersistentQueue: ACK pi<=" + ackPi.toString()
-                + "  removed=" + removed.toString()
-                + "  pending=" + _entries.size().toString());
+                + " removed=" + removed.toString()
+                + " pending=" + _entries.size().toString());
         }
     }
 
-    //! Return up to maxCount oldest entries for reconnect retransmission.
-    //! The caller should re-enqueue the "d" field of each entry.
-    //! Entries are NOT removed here; removal happens via ackUpTo().
-    //! @param maxCount Maximum number of entries to return
-    //! @return Slice of the internal array (oldest first)
+    //! Return up to maxCount oldest entries. Does NOT remove them.
     function getResendBatch(maxCount as Number) as Array {
         var end = _entries.size();
         if (maxCount < end) { end = maxCount; }
         return _entries.slice(0, end);
     }
 
-    //! Force a write to flash.  Call on session stop and app exit.
-    function flush() as Void {
-        _writeToStorage();
-    }
+    function flush() as Void { _writeToStorage(); }
 
-    //! Number of packets currently waiting for an ACK.
-    function size() as Number {
-        return _entries.size();
-    }
+    function size() as Number { return _entries.size(); }
 
-    //! Wipe the queue — called at the start of each new session so packet
-    //! indices from the previous session do not collide with new ones.
+    //! Wipe the queue — called on new session start so old pi values don't
+    //! collide with the reset-to-0 counter.
     function clear() as Void {
         _entries = [] as Array;
         _dirty   = 0;
@@ -122,12 +98,15 @@ class PersistentQueue {
 
     // ── Private ───────────────────────────────────────────────────
 
+    //! Write _entries to flash. Wrapped per instructions: setValue can throw
+    //! if the storage quota (~64 KB) is exceeded.
     private function _writeToStorage() as Void {
         try {
             Application.Storage.setValue(STORAGE_KEY, _entries);
             _dirty = 0;
         } catch (ex instanceof Lang.Exception) {
             System.println("PersistentQueue: write failed: " + ex.getErrorMessage());
+            // Keep _dirty set so we try again on the next push.
         }
     }
 

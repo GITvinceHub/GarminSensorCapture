@@ -2,36 +2,31 @@ import Toybox.WatchUi;
 import Toybox.Lang;
 import Toybox.System;
 
-//! Input delegate — maps physical buttons to app actions.
+//! Physical button handler.
 //!
-//! Button assignment (fēnix 8 Pro physical layout):
-//!   START / STOP  short  → Start / Stop recording
-//!   START / STOP  long   → New session (stop current + start fresh)
-//!   BACK / LAP    short  → Mark event (lap / waypoint)
-//!   BACK / LAP    long   → Cancel / back (close menu, or no-op)
-//!   UP / MENU     short  → Next screen (1 → 2 → … → 6 → 1)
-//!   UP / MENU     long   → Open capture menu (KEY_MENU injected by OS)
-//!   DOWN          short  → Next detail sub-page in current screen
-//!   DOWN          long   → Toggle button lock
+//! Implements FR-021..FR-028 button mapping per SPECIFICATION.md §4.3 / §12.3.
+//! NFR-012: onKey / onKeyReleased wrapped in try/catch.
 //!
-//! Button lock: when enabled all keys except DOWN are silently eaten.
+//!   START short  → start / stop                 FR-023
+//!   START long   → new session (stop + start)   FR-024
+//!   BACK short   → mark event                   FR-025
+//!   BACK long    → emergency stop / close menu  FR-026
+//!   UP short     → next screen                  FR-021
+//!   UP long      → open capture menu            FR-027
+//!   DOWN short   → next sub-page                FR-022
+//!   DOWN long    → toggle button lock           FR-028
+//!
+//! Button lock: when enabled, every key except DOWN is silently eaten.
 class MainDelegate extends WatchUi.InputDelegate {
 
-    //! Threshold for long-press detection in milliseconds
     private const LONG_PRESS_MS = 1000;
 
     private var _sessionManager as SessionManager;
     private var _viewModel      as ViewModel;
     private var _uiState        as UiState;
     private var _view           as MainView;
+    private var _pressTime      as Number;
 
-    //! Timestamp recorded on each key-down event
-    private var _pressTime as Number;
-
-    //! @param sessionManager Shared session manager
-    //! @param viewModel      Shared view model (read-only in delegate)
-    //! @param uiState        Shared UI navigation state
-    //! @param view           The main view (for requestUpdate callbacks)
     function initialize(
         sessionManager as SessionManager,
         viewModel      as ViewModel,
@@ -46,46 +41,40 @@ class MainDelegate extends WatchUi.InputDelegate {
         _pressTime      = 0;
     }
 
-    //! Record press timestamp on key-down AND consume the event so the OS
-    //! does not inject secondary events (e.g. KEY_MENU from a long UP press).
-    //! All logic is deferred to onKeyReleased where held duration is known.
+    //! Capture press time AND consume key-down so the OS does not inject
+    //! a secondary KEY_MENU event on long UP press.
     function onKey(keyEvent as WatchUi.KeyEvent) as Boolean {
-        _pressTime = System.getTimer();
-        return true;  // consume key-down — prevents OS KEY_MENU injection
+        try {
+            _pressTime = System.getTimer();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainDelegate: onKey exception: " + ex.getErrorMessage());
+        }
+        return true;
     }
 
-    //! Act on key release, computing hold duration for long-press detection.
-    //!
-    //! KEY_UP long-press opens the capture menu — handled here rather than
-    //! relying on the OS to inject KEY_MENU (which is unreliable in the
-    //! simulator and varies across firmware versions).
+    //! NFR-012: wrapped in outer try/catch — no exception propagates to CIQ.
     function onKeyReleased(keyEvent as WatchUi.KeyEvent) as Boolean {
         try {
             var key  = keyEvent.getKey();
             var held = System.getTimer() - _pressTime;
-
-            // Guard: held should never be negative (timer wrap) or absurdly
-            // large (pressTime was never set).  Clamp to [0, 10 000] ms.
             if (held < 0 || held > 10000) { held = 0; }
 
-            // ── Button-lock filter ────────────────────────────────
+            // Button-lock filter — only DOWN escapes.
             if (_uiState.isButtonLocked() && key != WatchUi.KEY_DOWN) {
                 WatchUi.requestUpdate();
                 return true;
             }
 
-            // ── Capture menu navigation ───────────────────────────
+            // Menu overlay handling.
             if (_uiState.isMenuOpen()) {
                 return _handleMenuKey(key);
             }
 
-            // ── Normal button handling ────────────────────────────
-
             if (key == WatchUi.KEY_START) {
                 if (held >= LONG_PRESS_MS) {
-                    _sessionManager.restartNewSession();
+                    _sessionManager.restartNewSession();  // FR-024
                 } else {
-                    _handleStartStop();
+                    _handleStartStop();                   // FR-023
                 }
                 WatchUi.requestUpdate();
                 return true;
@@ -93,28 +82,25 @@ class MainDelegate extends WatchUi.InputDelegate {
 
             if (key == WatchUi.KEY_ESC) {
                 if (held >= LONG_PRESS_MS) {
-                    _handleBackLong();
+                    _handleBackLong();                    // FR-026
                 } else {
-                    _sessionManager.markEvent();
+                    _sessionManager.markEvent();          // FR-025
                 }
                 WatchUi.requestUpdate();
                 return true;
             }
 
-            // KEY_UP  short → next screen   long → open capture menu
-            // (Long-press is detected from our own timer, not from OS-injected
-            // KEY_MENU, because onKey now consumes the key-down event.)
             if (key == WatchUi.KEY_UP) {
                 if (held >= LONG_PRESS_MS) {
-                    _uiState.openMenu();
+                    _uiState.openMenu();                  // FR-027
                 } else {
-                    _uiState.nextScreen();
+                    _uiState.nextScreen();                // FR-021
                 }
                 WatchUi.requestUpdate();
                 return true;
             }
 
-            // KEY_MENU: kept as a fallback in case some firmware still injects it.
+            // Fallback: some firmware still injects KEY_MENU on long UP.
             if (key == WatchUi.KEY_MENU) {
                 _uiState.openMenu();
                 WatchUi.requestUpdate();
@@ -123,17 +109,15 @@ class MainDelegate extends WatchUi.InputDelegate {
 
             if (key == WatchUi.KEY_DOWN) {
                 if (held >= LONG_PRESS_MS) {
-                    _uiState.toggleButtonLock();
+                    _uiState.toggleButtonLock();          // FR-028
                 } else {
-                    _uiState.nextDetail();
+                    _uiState.nextDetail();                // FR-022
                 }
                 WatchUi.requestUpdate();
                 return true;
             }
 
-            // KEY_ENTER: the fēnix 8 Pro simulator fires KEY_ENTER for the red
-            // START button.  Treat it identically to KEY_START so start/stop
-            // works in the simulator without breaking the physical device.
+            // KEY_ENTER — simulator fires this for the START button.
             if (key == WatchUi.KEY_ENTER) {
                 if (held >= LONG_PRESS_MS) {
                     _sessionManager.restartNewSession();
@@ -153,9 +137,7 @@ class MainDelegate extends WatchUi.InputDelegate {
         return false;
     }
 
-    // ── Private handlers ──────────────────────────────────────────
-
-    //! Toggle recording state (start if IDLE, stop if RECORDING).
+    //! START short → toggle IDLE ↔ RECORDING.
     private function _handleStartStop() as Void {
         var state = _sessionManager.getState();
         if (state == SessionManager.STATE_IDLE) {
@@ -163,22 +145,21 @@ class MainDelegate extends WatchUi.InputDelegate {
         } else if (state == SessionManager.STATE_RECORDING) {
             _sessionManager.stopSession();
         }
-        // STATE_STOPPING: transition in progress, ignore
+        // STATE_STOPPING: in-flight transition, ignore.
     }
 
-    //! BACK long: close menu if open, stop recording with confirmation if active.
+    //! BACK long → close menu if open, else emergency stop if recording.
     private function _handleBackLong() as Void {
         if (_uiState.isMenuOpen()) {
             _uiState.closeMenu();
             return;
         }
-        // If recording, long-press BACK acts as an emergency stop
         if (_sessionManager.getState() == SessionManager.STATE_RECORDING) {
             _sessionManager.stopSession();
         }
     }
 
-    //! Route key events while the capture menu is open.
+    //! Routes key events while the capture menu overlay is open.
     private function _handleMenuKey(key as Number) as Boolean {
         if (key == WatchUi.KEY_DOWN || key == WatchUi.KEY_UP) {
             _uiState.nextMenuItem();
@@ -199,23 +180,19 @@ class MainDelegate extends WatchUi.InputDelegate {
         return false;
     }
 
-    //! Execute the selected menu action.
     private function _executeMenuItem(index as Number) as Void {
         if (index == UiState.MENU_NEW_SESSION) {
             _sessionManager.restartNewSession();
-        } else if (index == UiState.MENU_SYS_INFO) {
-            // Navigate to Recording screen for system info
-            // (no action needed — just close menu)
         }
-        // Other menu items: close menu only
+        // Other menu items close the menu only.
     }
 
-    //! Swipe handler (passthrough — watch uses button navigation).
+    //! No swipe navigation — button-driven UX.
     function onSwipe(swipeEvent as WatchUi.SwipeEvent) as Boolean {
         return false;
     }
 
-    //! Tap handler (touchscreen only — fēnix 8 Pro has no touchscreen).
+    //! fēnix 8 Pro has no touchscreen; pass through.
     function onTap(clickEvent as WatchUi.ClickEvent) as Boolean {
         return false;
     }

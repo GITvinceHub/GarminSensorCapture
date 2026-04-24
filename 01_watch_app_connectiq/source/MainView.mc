@@ -2,11 +2,20 @@ import Toybox.WatchUi;
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.System;
+import Toybox.Timer;
 
 //! Main view — 14-screen UI for GarminSensorCapture.
 //! Target: fēnix 8 Pro 454×454 AMOLED.
+//!
+//! Implements FR-020 (14 screens), FR-022 (4 sub-pages each),
+//!            FR-029 (2 Hz refresh timer during recording).
+//! NFR-012: onUpdate and the refresh-timer callback are wrapped in try/catch.
+//!
 //! UP = next screen (circular). DOWN = next sub-page (4 per screen).
 class MainView extends WatchUi.View {
+
+    //! FR-029 refresh period — 500 ms = 2 Hz.
+    private const REFRESH_INTERVAL_MS = 500;
 
     private var _sessionManager as SessionManager;
     private var _viewModel      as ViewModel;
@@ -15,6 +24,9 @@ class MainView extends WatchUi.View {
     private var _h  as Number;
     private var _cx as Number;
     private var _cy as Number;
+
+    //! 2 Hz refresh timer (FR-029).
+    private var _refreshTimer as Timer.Timer or Null;
 
     function initialize(
         sessionManager as SessionManager,
@@ -29,6 +41,7 @@ class MainView extends WatchUi.View {
         _h  = 454;
         _cx = 227;
         _cy = 227;
+        _refreshTimer = null;
     }
 
     function onLayout(dc as Graphics.Dc) as Void {
@@ -36,6 +49,44 @@ class MainView extends WatchUi.View {
         _h  = dc.getHeight();
         _cx = _w / 2;
         _cy = _h / 2;
+    }
+
+    //! Start the 2 Hz refresh timer when the view becomes visible.
+    function onShow() as Void {
+        try {
+            if (_refreshTimer == null) {
+                _refreshTimer = new Timer.Timer();
+                (_refreshTimer as Timer.Timer).start(
+                    method(:_onRefreshTick),
+                    REFRESH_INTERVAL_MS,
+                    true  // repeating
+                );
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: onShow timer start failed: " + ex.getErrorMessage());
+        }
+    }
+
+    //! Stop the refresh timer when the view is hidden.
+    function onHide() as Void {
+        try {
+            if (_refreshTimer != null) {
+                (_refreshTimer as Timer.Timer).stop();
+                _refreshTimer = null;
+            }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: onHide timer stop failed: " + ex.getErrorMessage());
+        }
+    }
+
+    //! FR-029 refresh-timer callback — wrapped per NFR-012.
+    //! Requests a re-draw of the view.
+    function _onRefreshTick() as Void {
+        try {
+            WatchUi.requestUpdate();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("MainView: refresh tick failed: " + ex.getErrorMessage());
+        }
     }
 
     function onUpdate(dc as Graphics.Dc) as Void {

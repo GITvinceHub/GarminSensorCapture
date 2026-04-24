@@ -3,67 +3,50 @@ import Toybox.System;
 import Toybox.Time;
 import Toybox.Time.Gregorian;
 
-//! Manages the lifecycle of a sensor capture session.
-//! State machine: IDLE → RECORDING → STOPPING → IDLE
+//! Orchestrator — owns all sensor, batch, communication and persistent subsystems.
 //!
-//! Owns references to SensorManager, PositionManager, BatchManager,
-//! PacketSerializer, and CommunicationManager.
+//! Implements contracts C-050, C-051 per SPECIFICATION.md §7.6.
+//! State machine: IDLE → RECORDING → STOPPING → IDLE (§6.2).
+//!
+//! INVARIANTS:
+//!  - INV-001: _packetIndex monotone within a session.
+//!  - INV-002: sessionId unique (YYYYMMDD_HHMMSS wall-clock).
+//!  - INV-003: header is first packet (pi=0, pt="header").
+//!  - INV-004: footer is last packet (pt="footer").
+//!
+//! Watchdog budget (NFR-004): the onBatchReady callback may fire 4×/s at 100 Hz
+//! IMU. Expensive meta gathers (SpO2/ActivityMonitor/Sensor.getInfo) are cached
+//! at most 1×/s via META_CACHE_TTL_MS to stay well inside the 400 ms budget.
 class SessionManager {
 
-    //! Session state constants
     static const STATE_IDLE      = 0;
     static const STATE_RECORDING = 1;
     static const STATE_STOPPING  = 2;
 
-    //! Current state
-    private var _state as Number;
-
-    //! Current session ID string
-    private var _sessionId as String;
-
-    //! Packet index counter (monotonic, resets each session)
-    private var _packetIndex as Number;
-
-    //! Total error count for this session
-    private var _errorCount as Number;
-
-    //! Unix timestamp (seconds) when the current session started.
-    //! Used to filter in-session history entries for the footer packet.
-    private var _sessionStartTsS as Number;
-
-    //! System.getTimer() value at session start — used for elapsed-time display.
+    private var _state               as Number;
+    private var _sessionId           as String;
+    private var _packetIndex         as Number;
+    private var _errorCount          as Number;
+    private var _sessionStartTsS     as Number;
     private var _sessionStartTimerMs as Number;
-
-    //! Event marks list (timestamps of marked events)
-    private var _eventMarks as Array<Number>;
-
-    //! Sub-system managers
-    private var _sensorManager    as SensorManager or Null;
-    private var _positionManager  as PositionManager or Null;
-    private var _batchManager     as BatchManager or Null;
-    private var _commManager      as CommunicationManager or Null;
-
-    //! Persistent ACK-tracked queue (survives app restarts)
-    private var _persistentQueue  as PersistentQueue or Null;
-
-    //! Whether the session has been initialized (subsystems created)
-    private var _initialized as Boolean;
-
-    //! Battery level (0-100) at the moment the current session started.
-    //! Used by ViewModel.computePowerQuality() to compute consumption rate.
+    private var _eventMarks          as Array<Number>;
     private var _sessionStartBattery as Number;
 
-    //! Cached meta data — refreshed at most once per META_CACHE_TTL_MS.
-    //! Avoids calling getSpo2Snapshot / getLiveSensorInfo / getActivityMonitorInfo
-    //! 4 times per sensor callback (once per batch dispatch), which causes
-    //! watchdog timeouts on fēnix 8 when those calls access flash/sensors.
+    private var _sensorManager    as SensorManager    or Null;
+    private var _positionManager  as PositionManager  or Null;
+    private var _batchManager     as BatchManager     or Null;
+    private var _commManager      as CommunicationManager or Null;
+    private var _persistentQueue  as PersistentQueue  or Null;
+
+    private var _initialized as Boolean;
+
+    //! C-051 cache — refreshed at most 1× per META_CACHE_TTL_MS.
     private var _cachedSpo2    as Dictionary;
     private var _cachedLive    as Dictionary;
     private var _cachedAmi     as Dictionary;
     private var _metaCacheTime as Number;
-    private const META_CACHE_TTL_MS = 1000;  // refresh at most 1× per second
+    private const META_CACHE_TTL_MS = 1000;
 
-    //! Constructor — does NOT start capturing; call initialize() first
     function initialize() {
         _state                = STATE_IDLE;
         _sessionId            = "";
@@ -74,30 +57,26 @@ class SessionManager {
         _sessionStartTimerMs  = 0;
         _sessionStartBattery  = 100;
         _initialized          = false;
-        _sensorManager    = null;
-        _positionManager  = null;
-        _batchManager     = null;
-        _commManager      = null;
-        _persistentQueue  = null;
+        _sensorManager   = null;
+        _positionManager = null;
+        _batchManager    = null;
+        _commManager     = null;
+        _persistentQueue = null;
         _cachedSpo2    = {} as Dictionary;
         _cachedLive    = {} as Dictionary;
         _cachedAmi     = {} as Dictionary;
-        _metaCacheTime = -META_CACHE_TTL_MS;  // force refresh on first batch
+        _metaCacheTime = -META_CACHE_TTL_MS;
     }
 
-    //! Initialize all sub-system managers.
-    //! Called from GarminSensorApp.onStart().
+    //! Wire all subsystems. Idempotent — called from GarminSensorApp.onStart().
     function setup() as Void {
-        if (_initialized) {
-            return;
-        }
+        if (_initialized) { return; }
 
         _sensorManager   = new SensorManager(method(:onSensorSample));
         _positionManager = new PositionManager(method(:onGpsUpdate));
         _batchManager    = new BatchManager(method(:onBatchReady));
         _commManager     = new CommunicationManager(method(:onCommStatusChange));
 
-        // ── Persistent queue: load any unACK-ed packets from previous run ──
         _persistentQueue = new PersistentQueue();
         (_commManager as CommunicationManager).setPersistentQueue(
             _persistentQueue as PersistentQueue);
@@ -106,13 +85,11 @@ class SessionManager {
         _initialized = true;
     }
 
-    //! Cleanup all sub-systems.
-    //! Called from GarminSensorApp.onStop().
+    //! Tear everything down. Called from GarminSensorApp.onStop().
     function cleanup() as Void {
         if (_state == STATE_RECORDING) {
             stopSession();
         }
-        // Force-flush persistent queue so any in-memory dirty entries survive
         if (_persistentQueue != null) {
             (_persistentQueue as PersistentQueue).flush();
         }
@@ -128,14 +105,12 @@ class SessionManager {
         _initialized = false;
     }
 
-    //! Start a new capture session.
-    //! Generates a session ID and activates all sensors.
-    //! Also builds and sends a session header packet containing user profile,
-    //! device info and (capped) sensor histories.
+    //! C-050 startSession().
+    //! Precondition: _state == STATE_IDLE.
+    //! Postcondition (success): _state == STATE_RECORDING, _packetIndex == 0,
+    //!   persistent queue cleared, header packet emitted (INV-003), sensors registered.
     function startSession() as Void {
-        if (_state != STATE_IDLE) {
-            return;
-        }
+        if (_state != STATE_IDLE) { return; }
 
         _sessionId            = generateSessionId();
         _packetIndex          = 0;
@@ -144,50 +119,59 @@ class SessionManager {
         _sessionStartTsS      = Time.now().value();
         _sessionStartTimerMs  = System.getTimer();
         _sessionStartBattery  = System.getSystemStats().battery.toNumber();
+        _metaCacheTime        = -META_CACHE_TTL_MS;  // force first refresh
 
-        // ── Clear persistent queue: new session → fresh ACK cycle ──
-        // Any packets from the previous session that were not ACK-ed are
-        // discarded here.  Android should ACK the tail of the previous
-        // session before the user starts a new one; if it has not, those
-        // packets are considered unrecoverable.
+        // Clear persistent queue — new session means fresh pi counter.
         if (_persistentQueue != null) {
             (_persistentQueue as PersistentQueue).clear();
         }
 
-        // ── Build and send the session header packet FIRST ─────────
-        // Wrapped in its own try/catch — failure is non-fatal; the
-        // data stream still starts even if the header is lost.
+        // Header packet first (INV-003). Isolated try/catch — header failure
+        // is non-fatal; the data stream still starts.
         try {
             _sendHeaderPacket();
         } catch (ex instanceof Lang.Exception) {
-            System.println("SessionManager: header packet exception: " + ex.getErrorMessage());
+            System.println("SessionManager: header packet failed: " + ex.getErrorMessage());
             _errorCount++;
         }
 
-        (_sensorManager   as SensorManager).register();
-        (_positionManager as PositionManager).enable();
-        (_batchManager    as BatchManager).reset();
+        // Each subsystem may fail independently; per C-050 "postcondition
+        // (partial failure)" we still transition to RECORDING if at least
+        // the IMU or GPS started.
+        try {
+            (_sensorManager as SensorManager).register();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: sensor register failed: " + ex.getErrorMessage());
+            _errorCount++;
+        }
+        try {
+            (_positionManager as PositionManager).enable();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: position enable failed: " + ex.getErrorMessage());
+            _errorCount++;
+        }
+        try {
+            (_batchManager as BatchManager).reset();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: batch reset failed: " + ex.getErrorMessage());
+            _errorCount++;
+        }
 
         _state = STATE_RECORDING;
         System.println("SessionManager: started session " + _sessionId);
     }
 
-    //! Build and transmit the session header packet (pt:"header") with user
-    //! profile, device info and sensor histories. Errors are ignored (the
-    //! main data stream proceeds either way).
+    //! Send the session header packet (pt="header", pi=0) per §8.2.
     private function _sendHeaderPacket() as Void {
         if (_sensorManager == null || _commManager == null) { return; }
 
-        // Max history entries per type — tuned to keep the header within
-        // MAX_PACKET_SIZE when aggregated across 7 history streams.
-        var MAX_HIST = 60;
+        var MAX_HIST = 60;  // per FR-008 + SPECIFICATION.md §8.2
 
         var sm = _sensorManager as SensorManager;
 
         var userProfile = sm.getUserProfile();
 
         var deviceInfo = {} as Dictionary;
-        // Device info from System.getDeviceSettings / System.getSystemStats
         var devSettings = System.getDeviceSettings();
         if (devSettings != null) {
             if (devSettings has :partNumber && devSettings.partNumber != null) {
@@ -200,9 +184,8 @@ class SessionManager {
                 deviceInfo.put("monkey_version", devSettings.monkeyVersion.toString());
             }
         }
-        deviceInfo.put("app_version", "1.2.0");
+        deviceInfo.put("app_version", "2.0.0");
 
-        // Header histories = pre-session context (no cutoff → pass 0 for minTsS)
         var histories = {
             "hr"       => sm.getHrHistory(MAX_HIST, 0),
             "hrv"      => sm.getHrvHistory(MAX_HIST, 0),
@@ -220,22 +203,16 @@ class SessionManager {
 
         if (header != null) {
             (_commManager as CommunicationManager).sendPacket(header);
-            System.println("SessionManager: header packet queued ("
-                + header.length() + " chars)");
+            System.println("SessionManager: header queued (" + header.length().toString() + " chars)");
         }
     }
 
-    //! Build and transmit the session footer packet (pt:"footer") with sensor
-    //! histories captured during the session (ts >= _sessionStartTsS).
-    //! Called from stopSession() before sensors are unregistered.
+    //! Send the session footer packet (pt="footer") per §8.3. INV-004.
     private function _sendFooterPacket() as Void {
         if (_sensorManager == null || _commManager == null) { return; }
         if (_sessionStartTsS <= 0) { return; }
 
-        // Higher cap than header since we want all in-session samples. The
-        // per-type serializer truncates if the aggregate overflows MAX_PACKET_SIZE.
         var MAX_HIST = 200;
-
         var sm = _sensorManager as SensorManager;
 
         var histories = {
@@ -251,96 +228,90 @@ class SessionManager {
         var footer = PacketSerializer.serializeFooterPacket(
             _sessionId, _packetIndex, System.getTimer(), histories
         );
-
         if (footer != null) {
             (_commManager as CommunicationManager).sendPacket(footer);
-            System.println("SessionManager: footer packet queued ("
-                + footer.length() + " chars)");
+            System.println("SessionManager: footer queued (" + footer.length().toString() + " chars)");
         }
     }
 
-    //! Stop the current capture session gracefully.
-    //! Flushes any pending batch, then transitions to IDLE.
+    //! Gracefully stop the session: flush batch → emit footer → unregister.
     function stopSession() as Void {
-        if (_state != STATE_RECORDING) {
-            return;
-        }
+        if (_state != STATE_RECORDING) { return; }
 
         _state = STATE_STOPPING;
         System.println("SessionManager: stopping session " + _sessionId);
 
-        // Flush remaining samples FIRST (may trigger one more data packet)
-        (_batchManager as BatchManager).flush();
-
-        // Send footer packet with in-session histories (before unregistering
-        // sensors so the comm channel is still active)
-        _sendFooterPacket();
-
-        // Flush persistent queue to flash so no dirty entries are lost
-        if (_persistentQueue != null) {
-            (_persistentQueue as PersistentQueue).flush();
-            System.println("SessionManager: persistent queue flushed ("
-                + (_persistentQueue as PersistentQueue).size().toString()
-                + " packets awaiting ACK)");
+        // Flush first — may trigger one final data packet.
+        try {
+            (_batchManager as BatchManager).flush();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: batch flush failed: " + ex.getErrorMessage());
+            _errorCount++;
         }
 
-        // Unregister sensors
-        (_sensorManager   as SensorManager).unregister();
-        (_positionManager as PositionManager).disable();
+        // Footer (INV-004) — channel still active.
+        try {
+            _sendFooterPacket();
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: footer failed: " + ex.getErrorMessage());
+            _errorCount++;
+        }
+
+        // Durable flush — any dirty entries in the queue survive a crash.
+        if (_persistentQueue != null) {
+            try {
+                (_persistentQueue as PersistentQueue).flush();
+                System.println("SessionManager: persistent queue flushed ("
+                    + (_persistentQueue as PersistentQueue).size().toString()
+                    + " packets awaiting ACK)");
+            } catch (ex instanceof Lang.Exception) {
+                System.println("SessionManager: pq flush failed: " + ex.getErrorMessage());
+            }
+        }
+
+        try { (_sensorManager   as SensorManager).unregister();   } catch (ex instanceof Lang.Exception) { }
+        try { (_positionManager as PositionManager).disable();    } catch (ex instanceof Lang.Exception) { }
 
         _state = STATE_IDLE;
-        System.println("SessionManager: session stopped. Packets sent: " + _packetIndex);
+        System.println("SessionManager: session stopped. Packets sent: " + _packetIndex.toString());
     }
 
-    //! Mark a session event (lap, waypoint).
+    //! Mark a session event (lap / waypoint).
     function markEvent() as Void {
         if (_state == STATE_RECORDING) {
             _eventMarks.add(System.getTimer());
-            System.println("SessionManager: event marked at " + System.getTimer());
+            System.println("SessionManager: event marked at " + System.getTimer().toString());
         }
     }
 
-    //! Generate a session ID from current wall-clock time.
-    //! Format: "YYYYMMDD_HHMMSS"
-    //! @return Session ID string
+    //! INV-002 — session ID is the wall-clock "YYYYMMDD_HHMMSS".
     function generateSessionId() as String {
-        var now = Time.now();
+        var now  = Time.now();
         var info = Gregorian.info(now, Time.FORMAT_SHORT);
-
-        var year  = info.year.format("%04d");
-        var month = info.month.format("%02d");
-        var day   = info.day.format("%02d");
-        var hour  = info.hour.format("%02d");
-        var min   = info.min.format("%02d");
-        var sec   = info.sec.format("%02d");
-
-        return year + month + day + "_" + hour + min + sec;
+        return info.year.format("%04d")
+             + info.month.format("%02d")
+             + info.day.format("%02d")
+             + "_"
+             + info.hour.format("%02d")
+             + info.min.format("%02d")
+             + info.sec.format("%02d");
     }
 
-    //! Get current session state.
-    //! @return One of STATE_IDLE, STATE_RECORDING, STATE_STOPPING
-    function getState() as Number {
-        return _state;
-    }
+    function getState() as Number { return _state; }
 
-    //! Return a rich dictionary snapshot for UI display.
-    //! Fields:
-    //!   state, sessionId, elapsedMs, packetCount, errorCount, eventCount,
-    //!   hasGpsFix, gpsQualityScore, isLinked, commQueueSize, commPersistentSize,
-    //!   commSendFailures, imuFreqHz, lastHr, hasRrIntervals, batchesSent,
-    //!   estimatedFileSizeBytes, droppedSamples, battery, sessionStartBattery
+    //! Rich snapshot for UI rendering.
     function getStatus() as Dictionary {
-        var hasGps          = false;
-        var isLinked        = false;
-        var gpsQ            = 0;
-        var queueSz         = 0;
-        var persistentSz    = 0;
-        var sendFailures    = 0;
-        var imuFreq         = 0.0f;
-        var lastHr          = 0;
-        var hasRr           = false;
-        var batches         = 0;
-        var droppedSamples  = 0;
+        var hasGps         = false;
+        var isLinked       = false;
+        var gpsQ           = 0;
+        var queueSz        = 0;
+        var persistentSz   = 0;
+        var sendFailures   = 0;
+        var imuFreq        = 0.0f;
+        var lastHr         = 0;
+        var hasRr          = false;
+        var batches        = 0;
+        var droppedSamples = 0;
 
         if (_positionManager != null) {
             var pm = _positionManager as PositionManager;
@@ -359,12 +330,12 @@ class SessionManager {
         if (_sensorManager != null) {
             var sm = _sensorManager as SensorManager;
             imuFreq = sm.getMeasuredFrequency();
-            lastHr  = sm.getLastHrBpm();      // cached — no Sensor.getInfo() call
+            lastHr  = sm.getLastHrBpm();
             hasRr   = sm.hasRrIntervals();
         }
         if (_batchManager != null) {
             var bm = _batchManager as BatchManager;
-            batches       = bm.getBatchesSent();
+            batches        = bm.getBatchesSent();
             droppedSamples = bm.getDroppedSampleCount();
         }
 
@@ -374,10 +345,7 @@ class SessionManager {
             if (elapsedMs < 0) { elapsedMs = 0; }
         }
 
-        // Rough file-size estimate: 900 bytes per packet on average
-        var fileSizeBytes = _packetIndex * 900;
-
-        // Current battery level (0–100)
+        var fileSizeBytes = _packetIndex * 900;  // rough estimate
         var battery = System.getSystemStats().battery.toNumber();
 
         return {
@@ -404,63 +372,41 @@ class SessionManager {
         };
     }
 
-    //! Stop any ongoing session and immediately start a new one.
-    //! Used for the START long-press "new file" action.
+    //! Used by START long-press: stop any ongoing session, then start a new one.
     function restartNewSession() as Void {
-        if (_state == STATE_RECORDING) {
-            stopSession();
-        }
-        if (_state == STATE_IDLE) {
-            startSession();
-        }
+        if (_state == STATE_RECORDING) { stopSession(); }
+        if (_state == STATE_IDLE)      { startSession(); }
     }
 
-    // ── Sub-manager accessors for UI layers ───────────────────────
+    // Accessors for UI layers
+    function getSensorManager()   as SensorManager or Null      { return _sensorManager;   }
+    function getPositionManager() as PositionManager or Null    { return _positionManager; }
+    function getBatchManager()    as BatchManager or Null       { return _batchManager;    }
+    function getCommManager()     as CommunicationManager or Null { return _commManager;   }
 
-    //! @return SensorManager instance, or null if not yet initialised
-    function getSensorManager() as SensorManager or Null {
-        return _sensorManager;
-    }
-
-    //! @return PositionManager instance, or null if not yet initialised
-    function getPositionManager() as PositionManager or Null {
-        return _positionManager;
-    }
-
-    //! @return BatchManager instance, or null if not yet initialised
-    function getBatchManager() as BatchManager or Null {
-        return _batchManager;
-    }
-
-    //! @return CommunicationManager instance, or null if not yet initialised
-    function getCommManager() as CommunicationManager or Null {
-        return _commManager;
-    }
-
-    //! Callback: called by SensorManager when a new IMU sample is ready.
-    //! @param sample Dictionary with sensor values
+    //! Sensor callback — sample arrived from IMU.
     function onSensorSample(sample as Dictionary) as Void {
-        if (_state != STATE_RECORDING) {
-            return;
+        if (_state != STATE_RECORDING) { return; }
+        try {
+            (_batchManager as BatchManager).accumulate(sample);
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: accumulate failed: " + ex.getErrorMessage());
+            _errorCount++;
         }
-        (_batchManager as BatchManager).accumulate(sample);
     }
 
-    //! Callback: called by PositionManager when a new GPS fix arrives.
-    //! Just updates the stored fix; no action needed here.
+    //! GPS callback — data is lazily pulled from PositionManager at batch time.
     function onGpsUpdate(gpsData as Dictionary) as Void {
-        // GPS data is read lazily from PositionManager when building a packet
+        // No-op — GPS is sampled lazily in _onBatchReadyImpl.
     }
 
-    //! Callback: called by BatchManager when a batch is ready to send.
-    //! @param samples Array of sample dictionaries
-    //!
-    //! Wrapped in try/catch: an exception here propagates through BatchManager
-    //! and SensorManager callbacks back to the CIQ runtime, which exits the app.
+    //! C-051 onBatchReady(samples).
+    //! Precondition: samples.size() > 0.
+    //! Postcondition: if state ∈ {RECORDING, STOPPING}, packet serialised,
+    //!   pushed to persistent queue, transmitted; _packetIndex incremented.
+    //!   NFR-012: no exception propagates.
     function onBatchReady(samples as Array<Dictionary>) as Void {
-        if (_state != STATE_RECORDING && _state != STATE_STOPPING) {
-            return;
-        }
+        if (_state != STATE_RECORDING && _state != STATE_STOPPING) { return; }
         try {
             _onBatchReadyImpl(samples);
         } catch (ex instanceof Lang.Exception) {
@@ -469,23 +415,15 @@ class SessionManager {
         }
     }
 
-    //! Internal implementation of onBatchReady — separated so the outer function
-    //! can catch any exception without polluting the method with nested try/catch.
     private function _onBatchReadyImpl(samples as Array<Dictionary>) as Void {
-        // Get GPS snapshot
         var gpsData = null;
         if (_positionManager != null) {
             gpsData = (_positionManager as PositionManager).getLastFix();
         }
 
-        // Get battery level (cheap — no flash/sensor access)
         var battery = System.getSystemStats().battery.toNumber();
 
-        // ── Refresh meta cache at most once per META_CACHE_TTL_MS ─────
-        // getSpo2Snapshot(), getLiveSensorInfo(), getActivityMonitorInfo() each
-        // access flash storage or sensor hardware.  Calling them 4 times per
-        // sensor callback (once per 25-sample batch) exceeds the CIQ watchdog
-        // budget on fēnix 8.  We cache the results and refresh once per second.
+        // Meta cache refresh (NFR-004 watchdog budget) — once per second.
         var nowMs = System.getTimer();
         if ((nowMs - _metaCacheTime) >= META_CACHE_TTL_MS && _sensorManager != null) {
             var sm = _sensorManager as SensorManager;
@@ -493,12 +431,12 @@ class SessionManager {
             catch (ex instanceof Lang.Exception) { _cachedSpo2 = {} as Dictionary; }
             try { _cachedLive = sm.getLiveSensorInfo(); }
             catch (ex instanceof Lang.Exception) { _cachedLive = {} as Dictionary; }
-            try { _cachedAmi  = sm.getActivityMonitorInfo(); }
-            catch (ex instanceof Lang.Exception) { _cachedAmi  = {} as Dictionary; }
+            try { _cachedAmi = sm.getActivityMonitorInfo(); }
+            catch (ex instanceof Lang.Exception) { _cachedAmi = {} as Dictionary; }
             _metaCacheTime = nowMs;
         }
 
-        // ── Build meta dict from cache + fresh battery ─────────────
+        // Build meta dict from cache + fresh battery.
         var meta = { "bat" => battery } as Dictionary;
 
         var spo2Val = _cachedSpo2.get("value");
@@ -507,30 +445,24 @@ class SessionManager {
             var spo2Age = _cachedSpo2.get("ageS");
             if (spo2Age != null) { meta.put("spo2_age_s", spo2Age); }
         }
-
         var liveKeys = _cachedLive.keys() as Array;
         for (var i = 0; i < liveKeys.size(); i++) {
             var k = liveKeys[i] as String;
             meta.put(k, _cachedLive.get(k));
         }
-
         var amKeys = _cachedAmi.keys() as Array;
         for (var j = 0; j < amKeys.size(); j++) {
             var k2 = amKeys[j] as String;
             meta.put(k2, _cachedAmi.get(k2));
         }
 
-        // ── RR intervals from the most recent sensor batch ─────────
         var rrIntervals = null;
         if (_sensorManager != null) {
             rrIntervals = (_sensorManager as SensorManager).getLastRrIntervals();
         }
 
-        // ── Serialize packet ───────────────────────────────────────
         var errorFlags = 0;
-        if (gpsData == null) {
-            errorFlags |= PacketSerializer.EF_GPS_ERROR;
-        }
+        if (gpsData == null) { errorFlags |= PacketSerializer.EF_GPS_ERROR; }
 
         var json = PacketSerializer.serializePacket(
             _sessionId,
@@ -543,28 +475,26 @@ class SessionManager {
             errorFlags
         );
 
-        // ── Send via BLE + persist for ACK tracking ────────────────
         if (json != null && json.length() > 0) {
-            // Push to persistent queue BEFORE transmit so the packet is
-            // durable even if the app crashes mid-send.  Removed only when
-            // Android replies with {"ack": _packetIndex}.
+            // Push persistent BEFORE transmit so a crash mid-send doesn't lose data.
             if (_persistentQueue != null) {
                 (_persistentQueue as PersistentQueue).push(_packetIndex, json as String);
             }
             (_commManager as CommunicationManager).sendPacket(json);
-            _packetIndex++;
+            _packetIndex++;  // INV-001: monotone increment.
         } else {
             _errorCount++;
             System.println("SessionManager: packet serialization failed");
         }
     }
 
-    //! Callback: called by CommunicationManager on link status changes.
-    //! @param connected true if BLE link is active
+    //! Called by CommunicationManager on link state changes.
     function onCommStatusChange(connected as Boolean) as Void {
-        System.println("SessionManager: comm status = " + connected.toString());
-        if (!connected) {
-            _errorCount++;
+        try {
+            System.println("SessionManager: comm status = " + connected.toString());
+            if (!connected) { _errorCount++; }
+        } catch (ex instanceof Lang.Exception) {
+            System.println("SessionManager: onCommStatusChange failed: " + ex.getErrorMessage());
         }
     }
 }
